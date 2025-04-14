@@ -2,12 +2,6 @@
   "HarvesterImageCatalog": {
     "leap": [
       {
-        "version": "15.2",
-        "build": "Build31.632",
-        "shortName": "OpenSUSE Leap JeOS 15.2",
-        "url": "https://download.opensuse.org/download/distribution/leap/15.2/appliances/openSUSE-Leap-15.2-JeOS.x86_64-15.2-OpenStack-Cloud-Build31.632.qcow2"
-      },
-      {
         "version": "15.3",
         "build": "Build10.25",
         "shortName": "OpenSUSE Leap JeOS 15.3",
