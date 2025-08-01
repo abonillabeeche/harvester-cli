@@ -304,12 +304,6 @@
         "shortName": "Ubuntu noble 24.04",
         "url": "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img",
         "build": "latest"
-      },
-      {
-        "version": "24.10",
-        "shortName": "Ubuntu oracular 24.10",
-        "url": "https://cloud-images.ubuntu.com/minimal/releases/oracular/release/ubuntu-24.10-minimal-cloudimg-amd64.img",
-        "build": "latest"
       }
     ]
   }
