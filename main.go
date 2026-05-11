@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/belgaied2/harvester-cli/cmd"
+	"github.com/abonillabeeche/harvester-cli/cmd"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"

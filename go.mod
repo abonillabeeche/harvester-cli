@@ -1,4 +1,4 @@
-module github.com/belgaied2/harvester-cli
+module github.com/abonillabeeche/harvester-cli
 
 go 1.25.7
 

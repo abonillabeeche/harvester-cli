@@ -57,7 +57,7 @@ type Os struct {
 }
 
 const (
-	defaultCatalogSource = "https://raw.githubusercontent.com/belgaied2/harvester-cli/feature-image-upload/image-metadata.json"
+	defaultCatalogSource = "https://raw.githubusercontent.com/abonillabeeche/harvester-cli/main/image-metadata.json"
 )
 
 // TemplateCommand defines the CLI command that lists VM templates in Harvester
