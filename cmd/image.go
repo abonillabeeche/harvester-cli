@@ -31,10 +31,11 @@ import (
 )
 
 type ImageData struct {
-	Name       string
-	Id         string
-	SourceType string
-	Url        string
+	Name         string
+	Id           string
+	SourceType   string
+	StorageClass string
+	Url          string
 }
 
 type CatalogEntry struct {
@@ -102,6 +103,11 @@ func ImageCommand() *cli.Command {
 						EnvVars:  []string{"HARVESTER_VM_IMAGE_DESCRIPTION"},
 						Required: false,
 					},
+					&cli.StringFlag{
+						Name:    "storage-class",
+						Usage:   "StorageClass to use for the image (e.g. tworeplicas, harvester-longhorn)",
+						EnvVars: []string{"HARVESTER_VM_IMAGE_SC"},
+					},
 				},
 			},
 			&cli.Command{
@@ -153,6 +159,7 @@ func imageList(ctx *cli.Context) (err error) {
 		{"NAME", "Name"},
 		{"ID", "Id"},
 		{"SOURCE TYPE", "SourceType"},
+		{"STORAGE CLASS", "StorageClass"},
 		{"URL", "Url"},
 	},
 		ctxv1)
@@ -162,10 +169,11 @@ func imageList(ctx *cli.Context) (err error) {
 	for _, imgItem := range imgList.Items {
 
 		writer.Write(&ImageData{
-			Name:       imgItem.Spec.DisplayName,
-			Id:         imgItem.Name,
-			SourceType: imgItem.Spec.SourceType,
-			Url:        imgItem.Spec.URL,
+			Name:         imgItem.Spec.DisplayName,
+			Id:           imgItem.Name,
+			SourceType:   string(imgItem.Spec.SourceType),
+			StorageClass: imgItem.Status.StorageClassName,
+			Url:          imgItem.Spec.URL,
 		})
 
 	}
@@ -287,8 +295,10 @@ func imageCreate(ctx *cli.Context) (err error) {
 		}
 
 	}
-	_, err = createImageObjectInAPI(ctx, vmImageDisplayName, sourceType, source)
-
+	imageID, err := createImageObjectInAPI(ctx, vmImageDisplayName, sourceType, source)
+	if err == nil {
+		fmt.Printf("Image created: %s\n", imageID)
+	}
 	return
 
 }
@@ -304,10 +314,11 @@ func createImageObjectInAPI(ctx *cli.Context, vmImageDisplayName string, sourceT
 			GenerateName: "image-",
 		},
 		Spec: v1beta1.VirtualMachineImageSpec{
-			Description: ctx.String("description"),
-			DisplayName: vmImageDisplayName,
-			SourceType:  sourceType,
-			URL:         source,
+			Description:            ctx.String("description"),
+			DisplayName:            vmImageDisplayName,
+			SourceType:             v1beta1.VirtualMachineImageSourceType(sourceType),
+			URL:                    source,
+			TargetStorageClassName: ctx.String("storage-class"),
 		},
 	}
 

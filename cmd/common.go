@@ -32,6 +32,7 @@ import (
 	kubeclient "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	VMv1 "kubevirt.io/api/core/v1"
 )
 
 const (
@@ -379,6 +380,11 @@ func defaultListOpts(ctx *cli.Context) *ntypes.ListOpts {
 func NewTrue() *bool {
 	b := true
 	return &b
+}
+
+// runStrategyPtr returns a pointer to a VirtualMachineRunStrategy value, for use in VM specs.
+func runStrategyPtr(s VMv1.VirtualMachineRunStrategy) *VMv1.VirtualMachineRunStrategy {
+	return &s
 }
 
 // RandomID returns a random string used as an ID internally in Harvester.

@@ -74,6 +74,9 @@ func mainErr() error {
 		cmd.TemplateCommand(),
 		cmd.ImageCommand(),
 		cmd.KeypairCommand(),
+		cmd.NetworkCommand(),
+		cmd.VolumeCommand(),
+		cmd.HostCommand(),
 		cmd.ImportCommand(),
 		cmd.CompleteCommand(),
 	}

@@ -39,7 +39,8 @@ const (
 
 var (
 	nsFlag = cli.StringFlag{
-		Name:    "namespace, n",
+		Name:    "namespace",
+		Aliases: []string{"n"},
 		Usage:   "Namespace of the VM",
 		EnvVars: []string{"HARVESTER_VM_NAMESPACE"},
 		Value:   defaultNamespace,
@@ -220,6 +221,19 @@ func VMCommand() *cli.Command {
 						Usage: "Name of the VM to restart",
 					},
 					&nsFlag,
+				},
+			},
+			{
+				Name:      "migrate",
+				Usage:     "Live-migrate a running VM to another host",
+				Action:    vmMigrate,
+				ArgsUsage: "[VM_NAME]",
+				Flags: []cli.Flag{
+					&nsFlag,
+					&cli.StringFlag{
+						Name:  "node",
+						Usage: "Target node name to migrate the VM to (optional; omit to let the scheduler choose)",
+					},
 				},
 			},
 		},
@@ -544,16 +558,18 @@ func vmCreateFromImage(ctx *cli.Context, c *harvclient.Clientset, vmTemplate *VM
 		return fmt.Errorf("VM count provided is 0, no VM will be created")
 	}
 
-	networkNamespace, networkName, err := getNamespaceAndName(ctx, ctx.String("network"))
-	if err != nil {
-		return err
-	}
-
-	// Checking if provided Network exists in Harvester
-	_, err = c.K8sCniCncfIoV1().NetworkAttachmentDefinitions(networkNamespace).Get(context.TODO(), networkName, k8smetav1.GetOptions{})
-
-	if err != nil {
-		return fmt.Errorf("problem while verifying network existence; %w", err)
+	if networkStr := ctx.String("network"); networkStr != "" {
+		networkNamespace, networkName, err := getNamespaceAndName(ctx, networkStr)
+		if err != nil {
+			return fmt.Errorf("invalid network %q: %w (use 'harvester network list' to see valid names)", networkStr, err)
+		}
+		if networkName == "" {
+			return fmt.Errorf("network flag %q produced an empty name; use format 'namespace/name' (see 'harvester network list')", networkStr)
+		}
+		_, err = c.K8sCniCncfIoV1().NetworkAttachmentDefinitions(networkNamespace).Get(context.TODO(), networkName, k8smetav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("network %q not found: %w (see 'harvester network list')", networkStr, err)
+		}
 	}
 
 	overCommitSetting, err := c.HarvesterhciV1beta1().Settings().Get(context.TODO(), defaultOverCommitSettingName, k8smetav1.GetOptions{})
@@ -636,9 +652,8 @@ func vmCreateFromImage(ctx *cli.Context, c *harvclient.Clientset, vmTemplate *VM
 				Labels: vmLabels,
 			},
 			Spec: VMv1.VirtualMachineSpec{
-				Running: NewTrue(),
-
-				Template: vmTemplate,
+				RunStrategy: runStrategyPtr(VMv1.RunStrategyAlways),
+				Template:    vmTemplate,
 			},
 		}
 
@@ -765,7 +780,7 @@ func buildVMTemplate(ctx *cli.Context, c *harvclient.Clientset,
 						{
 							Name:                   "nic-1",
 							Model:                  "virtio",
-							InterfaceBindingMethod: VMv1.DefaultBridgeNetworkInterface().InterfaceBindingMethod,
+							InterfaceBindingMethod: VMv1.InterfaceBindingMethod{Bridge: &VMv1.InterfaceBridge{}},
 						},
 					},
 					Disks: []VMv1.Disk{
@@ -883,8 +898,8 @@ func startVMbyName(c *harvclient.Clientset, ctx *cli.Context, vmName string) err
 
 // startVMbyRef updates a VM object to make it Running
 func startVMbyRef(c *harvclient.Clientset, ctx *cli.Context, vm VMv1.VirtualMachine) (err error) {
-
-	*vm.Spec.Running = true
+	vm.Spec.Running = nil
+	vm.Spec.RunStrategy = runStrategyPtr(VMv1.RunStrategyAlways)
 
 	_, err = c.KubevirtV1().VirtualMachines(ctx.String("namespace")).Update(context.TODO(), &vm, k8smetav1.UpdateOptions{})
 
@@ -934,9 +949,10 @@ func stopVMbyName(c *harvclient.Clientset, ctx *cli.Context, vmName string) erro
 	return stopVMbyRef(c, ctx, vm)
 }
 
-// stopVMbyRef will stop a VM by updating Spec.Running field of the VM object
+// stopVMbyRef will stop a VM by setting RunStrategy to Halted
 func stopVMbyRef(c *harvclient.Clientset, ctx *cli.Context, vm *VMv1.VirtualMachine) error {
-	*vm.Spec.Running = false
+	vm.Spec.Running = nil
+	vm.Spec.RunStrategy = runStrategyPtr(VMv1.RunStrategyHalted)
 
 	_, err := c.KubevirtV1().VirtualMachines(ctx.String("namespace")).Update(context.TODO(), vm, k8smetav1.UpdateOptions{})
 	if err != nil {
@@ -1171,4 +1187,55 @@ func userDataContainsKey(userData string) bool {
 
 	return false
 
+}
+
+// vmMigrate triggers a live migration for each VM name given as argument.
+func vmMigrate(ctx *cli.Context) error {
+	c, err := GetHarvesterClient(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, vmName := range ctx.Args().Slice() {
+		if err := migrateVMbyName(c, ctx, vmName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateVMbyName verifies the VM exists then creates a migration for it.
+func migrateVMbyName(c *harvclient.Clientset, ctx *cli.Context, vmName string) error {
+	_, err := c.KubevirtV1().VirtualMachines(ctx.String("namespace")).Get(context.TODO(), vmName, k8smetav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("VM %q not found: %w", vmName, err)
+	}
+
+	migration := &VMv1.VirtualMachineInstanceMigration{
+		ObjectMeta: k8smetav1.ObjectMeta{
+			GenerateName: "migrate-",
+			Namespace:    ctx.String("namespace"),
+		},
+		Spec: VMv1.VirtualMachineInstanceMigrationSpec{
+			VMIName: vmName,
+		},
+	}
+
+	if targetNode := ctx.String("node"); targetNode != "" {
+		migration.Spec.AddedNodeSelector = map[string]string{
+			"kubernetes.io/hostname": targetNode,
+		}
+	}
+
+	created, err := c.KubevirtV1().VirtualMachineInstanceMigrations(ctx.String("namespace")).Create(context.TODO(), migration, k8smetav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to create migration for VM %q: %w", vmName, err)
+	}
+
+	if ctx.String("node") != "" {
+		logrus.Infof("Migration %s created for VM %s → node %s", created.Name, vmName, ctx.String("node"))
+	} else {
+		logrus.Infof("Migration %s created for VM %s (scheduler will choose target node)", created.Name, vmName)
+	}
+	return nil
 }
