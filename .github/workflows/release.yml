@@ -6,73 +6,25 @@ on:
       - "v*.*.*"
 
 jobs:
-  build:
-    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+  goreleaser:
+    name: Build and release
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            asset: harvester-linux-amd64
-          - goos: linux
-            goarch: arm64
-            asset: harvester-linux-arm64
-          - goos: darwin
-            goarch: amd64
-            asset: harvester-darwin-amd64
-          - goos: darwin
-            goarch: arm64
-            asset: harvester-darwin-arm64
-          - goos: windows
-            goarch: amd64
-            asset: harvester-windows-amd64.exe
-          - goos: windows
-            goarch: arm64
-            asset: harvester-windows-arm64.exe
-
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
-      - name: Build
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
         env:
-          CGO_ENABLED: "0"
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: |
-          go build -ldflags="-X main.VERSION=${{ github.ref_name }}" -o ${{ matrix.asset }} .
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
-
-  release:
-    name: Create Release
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          draft: false
-          prerelease: false
-          fail_on_unmatched_files: true
-          generate_release_notes: true
-          files: |
-            harvester-linux-amd64
-            harvester-linux-arm64
-            harvester-darwin-amd64
-            harvester-darwin-arm64
-            harvester-windows-amd64.exe
-            harvester-windows-arm64.exe
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

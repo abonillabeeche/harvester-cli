@@ -71,7 +71,7 @@ func networkList(ctx *cli.Context) (err error) {
 	for _, nad := range nadList.Items {
 		cniType, vlanID := parseCNIConfig(nad.Spec.Config)
 		writer.Write(&NetworkData{
-			Name:      nad.Name,
+			Name:      colorName(nad.Name),
 			Namespace: nad.Namespace,
 			Type:      cniType,
 			VLAN:      vlanID,

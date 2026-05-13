@@ -1,0 +1,56 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: harvester
+    binary: harvester
+    ldflags:
+      - -s -w -X main.VERSION={{ .Tag }}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: harvester
+    name_template: "harvester_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - install.sh
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  github:
+    owner: abonillabeeche
+    name: harvester-cli
+  draft: false
+  prerelease: auto
+  name_template: "{{ .Tag }}"
+
+brews:
+  - name: harvester
+    repository:
+      owner: abonillabeeche
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/abonillabeeche/harvester-cli
+    description: CLI tool for managing Harvester HCI clusters — create and control VMs, images, volumes, networks, and hosts.
+    license: Apache-2.0
+    skip_upload: auto
+    test: |
+      system "#{bin}/harvester --version"
+    install: |
+      bin.install "harvester"

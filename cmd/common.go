@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/pkg/namesgenerator"
+	"github.com/fatih/color"
 	"github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
 	harvclient "github.com/harvester/harvester/pkg/generated/clientset/versioned"
 	"github.com/pkg/errors"
@@ -555,6 +556,47 @@ func MergeOptionsInUserData(userData string, defaultUserData string, sshKey *v1b
 
 	return finalUserData, nil
 
+}
+
+// colorStatus applies traffic-light coloring to a status string.
+// Green = healthy/running, Red = error/not-ready, Yellow = transitional, default = neutral.
+func colorStatus(s string) string {
+	switch strings.ToLower(strings.ReplaceAll(s, " ", "")) {
+	case "ready", "running", "healthy", "attached", "active", "bound", "succeeded":
+		return color.New(color.FgGreen, color.Bold).Sprint(s)
+	case "notready", "error", "failed", "crashloopbackoff", "unknown":
+		return color.New(color.FgRed, color.Bold).Sprint(s)
+	case "starting", "stopping", "migrating", "paused", "attaching", "detaching",
+		"waitingforvolumebinding", "provisioning", "pending":
+		return color.YellowString(s)
+	default:
+		return s
+	}
+}
+
+// colorPercent colors a "NN%" string green (<50), yellow (50-79), or red (≥80).
+func colorPercent(s string) string {
+	trimmed := strings.TrimSuffix(s, "%")
+	if trimmed == s {
+		return s
+	}
+	n, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return s
+	}
+	switch {
+	case n >= 80:
+		return color.New(color.FgRed, color.Bold).Sprintf("%s", s)
+	case n >= 50:
+		return color.YellowString("%s", s)
+	default:
+		return color.GreenString("%s", s)
+	}
+}
+
+// colorName renders a resource name in bold cyan.
+func colorName(s string) string {
+	return color.New(color.FgCyan, color.Bold).Sprint(s)
 }
 
 func getNamespaceAndName(ctx *cli.Context, resourceName string) (resourceNS string, resource string, err error) {

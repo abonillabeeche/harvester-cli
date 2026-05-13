@@ -43,6 +43,38 @@ A fast, kubectl-style command-line tool for managing [Harvester HCI](https://har
 
 ## Installation
 
+### Homebrew (macOS and Linux — recommended)
+
+```bash
+brew install abonillabeeche/tap/harvester
+```
+
+Homebrew handles the macOS quarantine flag automatically, so Gatekeeper will not block the binary.
+
+> **First-time setup:** add the tap once with `brew tap abonillabeeche/tap`, then install as above.
+
+---
+
+### Install script (macOS and Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/abonillabeeche/harvester-cli/main/install.sh | sh
+```
+
+The script auto-detects your OS and architecture, downloads the right binary from the latest release, and removes the macOS quarantine flag. To install to a custom location:
+
+```bash
+INSTALL_DIR=~/.local/bin sh <(curl -fsSL https://raw.githubusercontent.com/abonillabeeche/harvester-cli/main/install.sh)
+```
+
+---
+
+### Windows
+
+Download the `.exe` for your architecture from the [latest release](https://github.com/abonillabeeche/harvester-cli/releases/latest) and place it somewhere on your `%PATH%`.
+
+---
+
 ### Build from source
 
 Requirements: Go 1.21+
@@ -50,20 +82,7 @@ Requirements: Go 1.21+
 ```bash
 git clone https://github.com/abonillabeeche/harvester-cli.git
 cd harvester-cli
-
-# macOS arm64
-CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o harvester .
-
-# macOS x86_64
-CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o harvester .
-
-# Linux x86_64
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o harvester .
-```
-
-Move the binary somewhere on your `$PATH`:
-
-```bash
+go build -o harvester .
 sudo mv harvester /usr/local/bin/
 harvester --version
 ```

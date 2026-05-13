@@ -169,7 +169,7 @@ func imageList(ctx *cli.Context) (err error) {
 	for _, imgItem := range imgList.Items {
 
 		writer.Write(&ImageData{
-			Name:         imgItem.Spec.DisplayName,
+			Name:         colorName(imgItem.Spec.DisplayName),
 			Id:           imgItem.Name,
 			SourceType:   string(imgItem.Spec.SourceType),
 			StorageClass: imgItem.Status.StorageClassName,
