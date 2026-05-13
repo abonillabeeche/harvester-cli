@@ -40,7 +40,7 @@ release:
   prerelease: auto
   name_template: "{{ .Tag }}"
 
-homebrew_casks:
+brews:
   - name: harvester
     repository:
       owner: abonillabeeche
@@ -50,7 +50,7 @@ homebrew_casks:
     description: CLI tool for managing Harvester HCI clusters — create and control VMs, images, volumes, networks, and hosts.
     license: Apache-2.0
     skip_upload: auto
-    test: |
-      system "#{bin}/harvester --version"
     install: |
       bin.install "harvester"
+    test: |
+      system "#{bin}/harvester --version"
