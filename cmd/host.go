@@ -97,14 +97,14 @@ func hostList(ctx *cli.Context) error {
 		node := &nodes.Items[i]
 		u := usageMap[node.Name]
 		writer.Write(&HostData{
-			Name:     colorName(node.Name),
-			Status:   colorStatus(hostNodeStatus(node)),
+			Name:     node.Name,
+			Status:   hostNodeStatus(node),
 			Roles:    hostNodeRoles(node),
 			Age:      hostNodeAge(node.CreationTimestamp.Time),
 			CPU:      hostCPUCores(u),
-			CPUPct:   colorPercent(hostCPUPercent(node, u)),
+			CPUPct:   hostCPUPercent(node, u),
 			MemUse:   hostMemBytes(u),
-			MemPct:   colorPercent(hostMemPercent(node, u)),
+			MemPct:   hostMemPercent(node, u),
 			MemTotal: hostMemCapacity(node),
 		})
 	}

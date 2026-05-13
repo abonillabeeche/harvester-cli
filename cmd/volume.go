@@ -107,9 +107,9 @@ func volumeList(ctx *cli.Context) error {
 		}
 
 		writer.Write(&VolumeData{
-			Name:         colorName(pvc.Name),
+			Name:         pvc.Name,
 			Namespace:    pvc.Namespace,
-			State:        colorStatus(state),
+			State:        state,
 			Capacity:     capacity,
 			Used:         used,
 			StorageClass: sc,

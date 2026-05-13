@@ -297,9 +297,9 @@ func vmLs(ctx *cli.Context) error {
 		}
 
 		writer.Write(&VirtualMachineData{
-			State:          colorStatus(state),
+			State:          state,
 			VirtualMachine: vm,
-			Name:           colorName(vm.Name),
+			Name:           vm.Name,
 			Node:           vmiMap[vm.Name].Status.NodeName,
 			CPU:            vm.Spec.Template.Spec.Domain.CPU.Cores,
 			Memory:         memory,

@@ -55,7 +55,6 @@ replace (
 
 require (
 	github.com/docker/docker v28.3.3+incompatible
-	github.com/fatih/color v1.19.0
 	github.com/grantae/certinfo v0.0.0-20170412194111-59d56a35515b
 	github.com/harvester/harvester v1.8.0
 	github.com/harvester/vm-import-controller v1.8.0
