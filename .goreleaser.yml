@@ -40,7 +40,7 @@ release:
   prerelease: auto
   name_template: "{{ .Tag }}"
 
-brews:
+homebrew_casks:
   - name: harvester
     repository:
       owner: abonillabeeche
