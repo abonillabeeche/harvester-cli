@@ -38,9 +38,16 @@ func mainErr() error {
 	// 	return nil
 	// }
 	app.Version = VERSION
-	app.Authors = append(app.Authors, &cli.Author{
-		Name:  "Mohamed Belgaied Hassine",
-		Email: "mohamed.belgaiedhassine@gmail.com"})
+	app.Authors = append(app.Authors,
+		&cli.Author{
+			Name:  "Mohamed Belgaied Hassine",
+			Email: "mohamed.belgaiedhassine@gmail.com",
+		},
+		&cli.Author{
+			Name:  "Alejandro Bonilla (maintainer)",
+			Email: "abonilla@suse.com",
+		},
+	)
 	app.Flags = []cli.Flag{
 		&cli.BoolFlag{
 			Name:  "debug",
