@@ -18,6 +18,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	k8sresource "k8s.io/apimachinery/pkg/api/resource"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	VMv1 "kubevirt.io/api/core/v1"
 )
@@ -527,6 +528,38 @@ func fetchTemplateVersionFromInt(namespace string, c *harvclient.Clientset, vers
 	return nil, fmt.Errorf("no template with the same version found")
 }
 
+// findVMImage resolves a VirtualMachineImage by resource name or display name.
+// It first tries a direct Get in the given namespace; if not found (404) it
+// searches across all namespaces matching by display name then resource name.
+// This lets users pass either the resource name (image-7tp2z) or display name
+// (noble-server), and avoids namespace-mismatch errors when -n targets the VM
+// namespace but the image lives elsewhere (typically default).
+func findVMImage(c *harvclient.Clientset, ns string, nameOrDisplay string) (*v1beta1.VirtualMachineImage, error) {
+	img, err := c.HarvesterhciV1beta1().VirtualMachineImages(ns).Get(context.TODO(), nameOrDisplay, k8smetav1.GetOptions{})
+	if err == nil {
+		return img, nil
+	}
+	if !k8serrors.IsNotFound(err) {
+		return nil, err
+	}
+	// 404: search all namespaces by display name, then resource name
+	list, err := c.HarvesterhciV1beta1().VirtualMachineImages("").List(context.TODO(), k8smetav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	for i := range list.Items {
+		if list.Items[i].Spec.DisplayName == nameOrDisplay {
+			return &list.Items[i], nil
+		}
+	}
+	for i := range list.Items {
+		if list.Items[i].Name == nameOrDisplay {
+			return &list.Items[i], nil
+		}
+	}
+	return nil, fmt.Errorf("image %q not found by resource name or display name", nameOrDisplay)
+}
+
 // vmCreateFromImage creates a VM from a VM Image using the CLI command context to get information
 func vmCreateFromImage(ctx *cli.Context, c *harvclient.Clientset, vmTemplate *VMv1.VirtualMachineInstanceTemplateSpec) error {
 
@@ -543,17 +576,22 @@ func vmCreateFromImage(ctx *cli.Context, c *harvclient.Clientset, vmTemplate *VM
 		if err != nil {
 			return err
 		}
-		vmImage, err = c.HarvesterhciV1beta1().VirtualMachineImages(vmImageNS).Get(context.TODO(), VMImageName, k8smetav1.GetOptions{})
+		vmImage, err = findVMImage(c, vmImageNS, VMImageName)
 		if err != nil {
 			return err
 		}
-		logrus.Debugf("Image ID %s given does exist!", ctx.String("vm-image-id"))
+		logrus.Debugf("Image found: %s/%s", vmImage.Namespace, vmImage.Name)
 	} else {
 		vmImage, err = setDefaultVMImage(c, ctx)
 		if err != nil {
 			return err
 		}
 	}
+	// Capture the actual namespace and name from the resolved image so the
+	// PVC annotation references the correct object regardless of what the
+	// user passed to --vm-image-id (display name, resource name, namespace/name).
+	actualImageNS := vmImage.Namespace
+	actualImageName := vmImage.Name
 	storageClassName := vmImage.Status.StorageClassName
 	vmNameBase := ctx.Args().First()
 
@@ -603,12 +641,7 @@ func vmCreateFromImage(ctx *cli.Context, c *harvclient.Clientset, vmTemplate *VM
 		vmiLabels["harvesterhci.io/vmNamePrefix"] = vmNameBase
 		diskRandomID := RandomID()
 		pvcName := vmName + "-disk-0-" + diskRandomID
-		vmImageNS, vmImageID, err := getNamespaceAndName(ctx, ctx.String("vm-image-id"))
-		if err != nil {
-			return err
-		}
-
-		pvcAnnotation := "[{\"metadata\":{\"name\":\"" + pvcName + "\",\"annotations\":{\"harvesterhci.io/imageId\":\"" + vmImageNS + "/" + vmImageID + "\"}},\"spec\":{\"accessModes\":[\"ReadWriteMany\"],\"resources\":{\"requests\":{\"storage\":\"" + ctx.String("disk-size") + "\"}},\"volumeMode\":\"Block\",\"storageClassName\":\"" + storageClassName + "\"}}]"
+		pvcAnnotation := "[{\"metadata\":{\"name\":\"" + pvcName + "\",\"annotations\":{\"harvesterhci.io/imageId\":\"" + actualImageNS + "/" + actualImageName + "\"}},\"spec\":{\"accessModes\":[\"ReadWriteMany\"],\"resources\":{\"requests\":{\"storage\":\"" + ctx.String("disk-size") + "\"}},\"volumeMode\":\"Block\",\"storageClassName\":\"" + storageClassName + "\"}}]"
 
 		if vmTemplate == nil {
 
@@ -718,10 +751,11 @@ func buildVMTemplate(ctx *cli.Context, c *harvclient.Clientset,
 		logrus.Debugf("SSH Key Name %s given does exist!", ctx.String("ssh-keyname"))
 
 	} else if !userDataContainsKey(cloudInitCustomUserData) {
+		// SSH key is optional; attempt to find one but do not fail if absent.
 		sshKey, err1 = setDefaultSSHKey(c, ctx)
 		if err1 != nil {
-			err = fmt.Errorf("error during setting default SSH key: %w", err1)
-			return
+			logrus.Debugf("No default SSH key found, creating VM without one: %v", err1)
+			sshKey = nil
 		}
 	}
 
@@ -916,18 +950,31 @@ func startVMbyName(c *harvclient.Clientset, ctx *cli.Context, vmName string) err
 	return startVMbyRef(c, ctx, *vm)
 }
 
-// startVMbyRef updates a VM object to make it Running
+// startVMbyRef updates a VM object to make it Running, retrying on conflict.
 func startVMbyRef(c *harvclient.Clientset, ctx *cli.Context, vm VMv1.VirtualMachine) (err error) {
-	vm.Spec.Running = nil
-	vm.Spec.RunStrategy = runStrategyPtr(VMv1.RunStrategyAlways)
-
-	_, err = c.KubevirtV1().VirtualMachines(ctx.String("namespace")).Update(context.TODO(), &vm, k8smetav1.UpdateOptions{})
-
-	if err != nil {
-		logrus.Warnf("An error happened while starting VM %s: %s", vm.Name, err)
-	} else {
-		logrus.Infof("VM %s started successfully", vm.Name)
+	for attempt := 0; attempt < 5; attempt++ {
+		if attempt > 0 {
+			fresh, fetchErr := c.KubevirtV1().VirtualMachines(ctx.String("namespace")).Get(context.TODO(), vm.Name, k8smetav1.GetOptions{})
+			if fetchErr != nil {
+				logrus.Warnf("An error happened while re-fetching VM %s: %s", vm.Name, fetchErr)
+				return nil
+			}
+			vm = *fresh
+			logrus.Debugf("Conflict updating VM %s, retrying (%d/5)...", vm.Name, attempt)
+		}
+		vm.Spec.Running = nil
+		vm.Spec.RunStrategy = runStrategyPtr(VMv1.RunStrategyAlways)
+		_, err = c.KubevirtV1().VirtualMachines(ctx.String("namespace")).Update(context.TODO(), &vm, k8smetav1.UpdateOptions{})
+		if err == nil {
+			logrus.Infof("VM %s started successfully", vm.Name)
+			return nil
+		}
+		if !k8serrors.IsConflict(err) {
+			logrus.Warnf("An error happened while starting VM %s: %s", vm.Name, err)
+			return nil
+		}
 	}
+	logrus.Warnf("An error happened while starting VM %s after retries: %s", vm.Name, err)
 	return nil
 }
 

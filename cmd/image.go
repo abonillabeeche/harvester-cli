@@ -174,7 +174,7 @@ func imageList(ctx *cli.Context) (err error) {
 
 		writer.Write(&ImageData{
 			Name:         imgItem.Spec.DisplayName,
-			Id:           imgItem.Name,
+			Id:           imgItem.Namespace + "/" + imgItem.Name,
 			SourceType:   string(imgItem.Spec.SourceType),
 			StorageClass: imgItem.Status.StorageClassName,
 			Url:          imgItem.Spec.URL,
@@ -300,7 +300,7 @@ func imageCreate(ctx *cli.Context) (err error) {
 
 	}
 	imageID, err := createImageObjectInAPI(ctx, vmImageDisplayName, sourceType, source)
-	if err == nil {
+	if err == nil && imageID != "" {
 		fmt.Printf("Image created: %s\n", imageID)
 	}
 	return

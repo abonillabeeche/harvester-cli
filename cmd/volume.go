@@ -68,7 +68,7 @@ func VolumeCommand() *cli.Command {
 					&cli.StringFlag{
 						Name:     "size",
 						Aliases:  []string{"s"},
-						Usage:    "Volume size, e.g. 10Gi",
+						Usage:    "Volume size using binary suffixes: 10Gi, 20Gi, 500Mi (Gi = gibibytes, Mi = mebibytes). Plain G/M are decimal and not recommended.",
 						EnvVars:  []string{"HARVESTER_VOLUME_SIZE"},
 						Required: true,
 					},
