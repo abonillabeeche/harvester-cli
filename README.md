@@ -383,7 +383,7 @@ harvester shell --ssh-user ubuntu --ssh-key ~/.ssh/mykey my-vm
 
 Every `create` subcommand accepts a `--dry-run` flag. Instead of calling the Kubernetes API, the CLI prints the fully-rendered YAML manifest to stdout and exits. This is useful for:
 
-- **GitOps workflows** — generate manifests locally, commit them to a Git repo, and let Flux or ArgoCD apply them to the cluster.
+- **GitOps workflows** — generate manifests locally, commit them to a Git repo, and let Fleet, Flux or ArgoCD apply them to the cluster.
 - **Reviewing changes before applying** — inspect the exact object the CLI would create before committing to it.
 - **Piping into `kubectl apply`** — run `harvester vm create --dry-run ... | kubectl apply -f -` for one-shot creation using the same flags as your normal workflow.
 
