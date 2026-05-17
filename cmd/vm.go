@@ -190,6 +190,10 @@ func VMCommand() *cli.Command {
 						EnvVars: []string{"HARVESTER_VM_NETWORK"},
 						Value:   "",
 					},
+					&cli.BoolFlag{
+						Name:  "dry-run",
+						Usage: "Print the YAML manifest that would be submitted without creating the resource",
+					},
 				},
 			},
 			{
@@ -526,6 +530,10 @@ func fetchTemplateVersionFromInt(namespace string, c *harvclient.Clientset, vers
 // vmCreateFromImage creates a VM from a VM Image using the CLI command context to get information
 func vmCreateFromImage(ctx *cli.Context, c *harvclient.Clientset, vmTemplate *VMv1.VirtualMachineInstanceTemplateSpec) error {
 
+	if ctx.Bool("dry-run") && ctx.String("vm-image-id") == "" {
+		return fmt.Errorf("--vm-image-id is required with --dry-run")
+	}
+
 	var err error
 	// Checking existence of Image ID and if not, using default ubuntu image.
 	imageID := ctx.String("vm-image-id")
@@ -641,11 +649,14 @@ func vmCreateFromImage(ctx *cli.Context, c *harvclient.Clientset, vmTemplate *VM
 		}
 
 		ubuntuVM := &VMv1.VirtualMachine{
+			TypeMeta: k8smetav1.TypeMeta{
+				APIVersion: "kubevirt.io/v1",
+				Kind:       "VirtualMachine",
+			},
 			ObjectMeta: k8smetav1.ObjectMeta{
 				Name:      vmName,
 				Namespace: ctx.String("namespace"),
 				Annotations: map[string]string{
-
 					vmAnnotationPVC:        pvcAnnotation,
 					vmAnnotationNetworkIps: "[]",
 				},
@@ -659,6 +670,15 @@ func vmCreateFromImage(ctx *cli.Context, c *harvclient.Clientset, vmTemplate *VM
 
 		if err != nil {
 			return err
+		}
+
+		if ctx.Bool("dry-run") {
+			out, err := toYAML(ubuntuVM)
+			if err != nil {
+				return fmt.Errorf("dry-run: %w", err)
+			}
+			fmt.Printf("---\n%s", out)
+			continue
 		}
 
 		_, err = c.KubevirtV1().VirtualMachines(ctx.String("namespace")).Create(context.TODO(), ubuntuVM, k8smetav1.CreateOptions{})

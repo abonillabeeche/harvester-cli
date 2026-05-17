@@ -108,6 +108,10 @@ func ImageCommand() *cli.Command {
 						Usage:   "StorageClass to use for the image (e.g. tworeplicas, harvester-longhorn)",
 						EnvVars: []string{"HARVESTER_VM_IMAGE_SC"},
 					},
+					&cli.BoolFlag{
+						Name:  "dry-run",
+						Usage: "Print the YAML manifest that would be submitted without creating the resource",
+					},
 				},
 			},
 			&cli.Command{
@@ -310,8 +314,13 @@ func createImageObjectInAPI(ctx *cli.Context, vmImageDisplayName string, sourceT
 	}
 
 	vmImage := &v1beta1.VirtualMachineImage{
+		TypeMeta: k8smetav1.TypeMeta{
+			APIVersion: "harvesterhci.io/v1beta1",
+			Kind:       "VirtualMachineImage",
+		},
 		ObjectMeta: k8smetav1.ObjectMeta{
 			GenerateName: "image-",
+			Namespace:    ctx.String("namespace"),
 		},
 		Spec: v1beta1.VirtualMachineImageSpec{
 			Description:            ctx.String("description"),
@@ -320,6 +329,17 @@ func createImageObjectInAPI(ctx *cli.Context, vmImageDisplayName string, sourceT
 			URL:                    source,
 			TargetStorageClassName: ctx.String("storage-class"),
 		},
+	}
+
+	if ctx.Bool("dry-run") {
+		var out string
+		out, err = toYAML(vmImage)
+		if err != nil {
+			err = fmt.Errorf("dry-run: %w", err)
+			return
+		}
+		fmt.Printf("---\n%s", out)
+		return
 	}
 
 	c, err := GetHarvesterClient(ctx)

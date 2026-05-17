@@ -557,6 +557,20 @@ func MergeOptionsInUserData(userData string, defaultUserData string, sshKey *v1b
 
 }
 
+// toYAML marshals a Kubernetes object to YAML using its JSON field tags.
+func toYAML(obj interface{}) (string, error) {
+	j, err := json.Marshal(obj)
+	if err != nil {
+		return "", err
+	}
+	var m interface{}
+	if err := json.Unmarshal(j, &m); err != nil {
+		return "", err
+	}
+	b, err := yaml.Marshal(m)
+	return string(b), err
+}
+
 func getNamespaceAndName(ctx *cli.Context, resourceName string) (resourceNS string, resource string, err error) {
 	if strings.Contains(resourceName, "/") {
 		parts := strings.Split(resourceName, "/")
