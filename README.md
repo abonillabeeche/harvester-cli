@@ -21,6 +21,7 @@ A fast, kubectl-style command-line tool for managing [Harvester HCI](https://har
   - [Templates](#templates)
   - [SSH Keypairs](#ssh-keypairs)
   - [Shell Access](#shell-access)
+- [Dry-run and GitOps](#dry-run-and-gitops)
 - [Tips and Gotchas](#tips-and-gotchas)
 
 ---
@@ -32,12 +33,13 @@ A fast, kubectl-style command-line tool for managing [Harvester HCI](https://har
 | **Virtual Machines** | List, create, delete, start, stop, restart, live-migrate |
 | **VM Images** | List (with StorageClass), upload from URL or file |
 | **Networks** | List NADs with VLAN info |
-| **Volumes** | List PVCs with live Longhorn usage and StorageClass |
+| **Volumes** | List PVCs with live Longhorn usage and StorageClass; create new PVCs |
 | **Hosts** | List nodes with real-time CPU % and memory usage from the metrics API |
 | **Templates** | List and inspect VM templates |
 | **SSH Keypairs** | List registered public keys |
 | **Shell** | Direct SSH into a running VM |
 | **Config** | Login to Rancher and auto-download the Harvester kubeconfig |
+| **Dry-run** | Print the Kubernetes YAML for any `create` command without applying it — ideal for GitOps workflows |
 
 ---
 
@@ -164,6 +166,7 @@ Creates a VM. **Important: all flags must come before the VM name.**
 | `--template` | | VM template in `name:version` format |
 | `--count` | | Create N identical VMs named `basename-1`…`basename-N` |
 | `--user-data-filepath` | | Path to a cloud-init user-data YAML file |
+| `--dry-run` | | Print the KubeVirt YAML without creating the VM |
 
 Examples:
 
@@ -176,6 +179,9 @@ harvester vm create --template ubuntu-base:1 --count 3 test-vm
 
 # Create a VM in a non-default namespace
 harvester vm create -n dev --cpus 4 --memory 8Gi dev-vm
+
+# Preview the manifest without applying it
+harvester vm create --dry-run --vm-image-id default/ubuntu-noble --network default/vlan1 my-vm
 ```
 
 ---
@@ -233,6 +239,11 @@ harvester image create \
   --storage-class tworeplicas \
   ubuntu-noble
 # Image created: default/ubuntu-noble
+
+# Preview the manifest without applying it
+harvester image create --dry-run \
+  --source https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img \
+  ubuntu-noble
 ```
 
 ---
@@ -265,6 +276,40 @@ Lists PersistentVolumeClaims cross-referenced with Longhorn to show actual used 
 NAME         NAMESPACE   STATE    CAPACITY   USED       STORAGE CLASS
 my-vm-disk   default     Healthy  20.0 GiB   3.2 GiB    tworeplicas
 data-vol     default     Healthy  100.0 GiB  45.1 GiB   harvester-longhorn
+```
+
+---
+
+```bash
+harvester volume create --storage-class CLASS --size SIZE [-n NAMESPACE] [--dry-run] VOLUME_NAME
+```
+
+Creates a PersistentVolumeClaim backed by the specified StorageClass. Use binary suffixes for size (`Gi`, `Mi`).
+
+| Flag | Short | Description |
+|---|---|---|
+| `--storage-class` | `--sc` | StorageClass for the volume (see `harvester volume list-storageclass`) |
+| `--size` | `-s` | Volume size, e.g. `10Gi`, `500Mi` |
+| `--namespace` | `-n` | Target namespace (default: `default`) |
+| `--dry-run` | | Print the PVC YAML without creating it |
+
+```bash
+harvester volume create --sc tworeplicas --size 20Gi my-data-vol
+# Volume created: default/my-data-vol
+```
+
+---
+
+```bash
+harvester volume list-storageclass
+```
+
+Lists all StorageClasses in the cluster — equivalent to `kubectl get sc`.
+
+```
+NAME                  PROVISIONER             RECLAIM POLICY   BINDING MODE    ALLOW EXPANSION
+harvester-longhorn    driver.longhorn.io      Delete           Immediate       true
+tworeplicas           driver.longhorn.io      Delete           Immediate       true
 ```
 
 ---
@@ -330,6 +375,143 @@ Opens an interactive SSH session directly into a running VM. Requires `ssh` to b
 
 ```bash
 harvester shell --ssh-user ubuntu --ssh-key ~/.ssh/mykey my-vm
+```
+
+---
+
+## Dry-run and GitOps
+
+Every `create` subcommand accepts a `--dry-run` flag. Instead of calling the Kubernetes API, the CLI prints the fully-rendered YAML manifest to stdout and exits. This is useful for:
+
+- **GitOps workflows** — generate manifests locally, commit them to a Git repo, and let Flux or ArgoCD apply them to the cluster.
+- **Reviewing changes before applying** — inspect the exact object the CLI would create before committing to it.
+- **Piping into `kubectl apply`** — run `harvester vm create --dry-run ... | kubectl apply -f -` for one-shot creation using the same flags as your normal workflow.
+
+### Volume
+
+```bash
+harvester volume create --dry-run --sc tworeplicas --size 5Gi testvol1
+```
+
+```yaml
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+    creationTimestamp: null
+    name: testvol1
+    namespace: default
+spec:
+    accessModes:
+        - ReadWriteMany
+    resources:
+        requests:
+            storage: 5Gi
+    storageClassName: tworeplicas
+    volumeMode: Block
+status: {}
+```
+
+### Image
+
+```bash
+harvester image create --dry-run \
+  --source https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img \
+  --storage-class tworeplicas \
+  ubuntu-noble
+```
+
+```yaml
+---
+apiVersion: harvesterhci.io/v1beta1
+kind: VirtualMachineImage
+metadata:
+    creationTimestamp: null
+    generateName: image-
+    namespace: default
+spec:
+    displayName: ubuntu-noble
+    sourceType: download
+    storageClassParameters: {}
+    targetStorageClassName: tworeplicas
+    url: https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+status:
+    progress: 0
+```
+
+### VM
+
+```bash
+harvester vm create --dry-run \
+  --vm-image-id default/image-abc12 \
+  --network default/vlan1 \
+  --cpus 2 --memory 4Gi --disk-size 20Gi \
+  my-vm
+```
+
+```yaml
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+    annotations:
+        harvesterhci.io/volumeClaimTemplates: '[{"metadata":{"name":"my-vm-disk-0-...","annotations":{"harvesterhci.io/imageId":"default/image-abc12"}},"spec":{"accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"20Gi"}},"volumeMode":"Block","storageClassName":"longhorn-image-abc12"}}]'
+        networks.harvesterhci.io/ips: '[]'
+    labels:
+        harvesterhci.io/creator: harvester
+    name: my-vm
+    namespace: default
+spec:
+    runStrategy: Always
+    template:
+        spec:
+            domain:
+                cpu:
+                    cores: 2
+                    sockets: 1
+                    threads: 1
+                devices:
+                    disks:
+                        - disk:
+                            bus: virtio
+                          name: disk-0
+                        - disk:
+                            bus: virtio
+                          name: cloudinitdisk
+                    interfaces:
+                        - bridge: {}
+                          model: virtio
+                          name: nic-1
+                resources:
+                    limits:
+                        cpu: "2"
+                        memory: 4Gi
+            networks:
+                - multus:
+                    networkName: default/vlan1
+                  name: nic-1
+            volumes:
+                - name: disk-0
+                  persistentVolumeClaim:
+                    claimName: my-vm-disk-0-...
+                - cloudInitNoCloud:
+                    networkData: "..."
+                    userData: "#cloud-config\n..."
+                  name: cloudinitdisk
+```
+
+### GitOps example
+
+```bash
+# Generate manifests for a new environment
+harvester volume create --dry-run --sc tworeplicas --size 50Gi -n prod db-vol     > manifests/db-vol.yaml
+harvester image create  --dry-run --source https://example.com/os.qcow2 prod-os   >> manifests/images.yaml
+harvester vm create     --dry-run --vm-image-id default/prod-os \
+                          --network default/vlan10 --cpus 4 --memory 8Gi -n prod \
+                          db-server                                                > manifests/db-server.yaml
+
+# Commit and push — let your GitOps controller apply them
+git add manifests/ && git commit -m "add prod db-server" && git push
 ```
 
 ---
