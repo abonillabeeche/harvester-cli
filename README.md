@@ -15,6 +15,7 @@ A fast, kubectl-style command-line tool for managing [Harvester HCI](https://har
 - [Commands](#commands)
   - [VM Management](#vm-management)
   - [Images](#images)
+  - [Image Catalog](#image-catalog)
   - [Networks](#networks)
   - [Volumes](#volumes)
   - [Hosts](#hosts)
@@ -32,6 +33,7 @@ A fast, kubectl-style command-line tool for managing [Harvester HCI](https://har
 |---|---|
 | **Virtual Machines** | List, create, delete, start, stop, restart, live-migrate |
 | **VM Images** | List (with StorageClass), upload from URL or file |
+| **Image Catalog** | Curated list of cloud-init-enabled Linux images (Fedora, CentOS Stream, Debian, AlmaLinux, Rocky, Ubuntu, openSUSE); interactive picker, scriptable `create`, works offline via embedded JSON + `catalog init` cache |
 | **Networks** | List NADs with VLAN info |
 | **Volumes** | List PVCs with live Longhorn usage and StorageClass; create new PVCs |
 | **Hosts** | List nodes with real-time CPU % and memory usage from the metrics API |
@@ -245,6 +247,166 @@ harvester image create --dry-run \
   --source https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img \
   ubuntu-noble
 ```
+
+---
+
+### Image Catalog
+
+The catalog is a curated list of publicly-available, **cloud-init-enabled** Linux images (Fedora, CentOS Stream, Debian, AlmaLinux, Rocky Linux, Ubuntu, openSUSE — see `image-metadata.json`). Instead of hunting for the right download URL for every cluster, you pick from the catalog and the CLI submits the image to Harvester.
+
+The catalog metadata lives in `image-metadata.json` at the root of this repo. That same file is bundled into every CLI binary via `//go:embed`, and it can be cached to disk with `catalog init` — so the catalog works even when your workstation has no internet, as long as the Harvester servers themselves can reach the image URLs.
+
+#### Where the catalog comes from
+
+Every `catalog` subcommand resolves its metadata source in this order:
+
+1. **`--metadata-url` flag** or **`HARVESTER_CATALOG_METADATA` env var**, if explicitly set (accepts `https://…`, `file://…`, or a plain filesystem path).
+2. **`~/.harvester/image-metadata.json`** if it exists (the local cache written by `catalog init`).
+3. **Default remote URL** (`https://raw.githubusercontent.com/abonillabeeche/harvester-cli/main/image-metadata.json`). If the HTTP fetch fails, the CLI transparently falls back to the copy **embedded in the binary** (with a warning), so `catalog` still works offline out of the box.
+
+The interactive `catalog` command prints the resolved source at the top of its output so you can always tell where the list came from:
+
+```
+$ harvester image catalog
+Image catalog source: /Users/you/.harvester/image-metadata.json
+```
+
+#### `catalog init` — cache the catalog for offline use
+
+```bash
+harvester image catalog init [--metadata-url URL] [--force]
+```
+
+Downloads the metadata JSON and writes it to `~/.harvester/image-metadata.json` (alongside the harvester CLI config). Subsequent `catalog` commands prefer this file automatically.
+
+```bash
+# First-time setup while online:
+harvester image catalog init
+# Downloading catalog from: https://raw.githubusercontent.com/abonillabeeche/harvester-cli/main/image-metadata.json
+# Saving to:                /Users/you/.harvester/image-metadata.json
+# Cached catalog with 10 OS group(s). Future 'image catalog' runs will use this file automatically.
+
+# Refresh when new distros are added upstream:
+harvester image catalog init --force
+
+# Cache from a private mirror instead of GitHub:
+harvester image catalog init --metadata-url https://mirror.internal/harvester/image-metadata.json --force
+```
+
+#### `catalog` — interactive picker
+
+```bash
+harvester image catalog [--namespace NS] [--storage-class SC] [--metadata-url URL]
+```
+
+Walks you through picking an OS group, then an image, then the namespace, then the StorageClass. If the caller has cluster-list permissions, namespace and StorageClass are shown as numbered pickers; otherwise the CLI falls back to a free-form text prompt (useful for Rancher-proxied Harvester kubeconfigs, which typically only grant namespaced reads).
+
+```
+$ harvester image catalog
+Image catalog source: /Users/you/.harvester/image-metadata.json
+
+NUMBER  NAME                  KEY                   NUMBER OF IMAGES
+1       AlmaLinux             almalinux             3
+2       CentOS Stream         centos-stream         2
+3       Debian                debian                2
+4       Fedora                fedora                3
+5       openSUSE Leap         opensuse-leap         4
+6       openSUSE MicroOS      opensuse-microos      1
+7       openSUSE Tumbleweed   opensuse-tumbleweed   1
+8       Rocky Linux           rocky-linux           5
+9       Ubuntu                ubuntu                6
+Insert a number to select the image OS:
+4
+
+Here are the images available for Fedora
+
+NUMBER  NAME              VERSION  BUILD  URL
+1       Fedora Cloud 44   44       1.7    https://download.fedoraproject.org/.../Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
+2       Fedora Cloud 43   43       1.6    https://download.fedoraproject.org/.../Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2
+3       Fedora Cloud 42   42       1.1    https://download.fedoraproject.org/.../Fedora-Cloud-Base-Generic-42-1.1.x86_64.qcow2
+
+Insert a number to select an image to download:
+1
+
+Your image URL is : https://download.fedoraproject.org/.../Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
+
+Enter the namespace to create the image in [default]: my-project
+
+Enter the StorageClass name (empty = cluster default): tworeplicas
+
+INFO Creating image "Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2" in namespace "my-project" with StorageClass "tworeplicas"
+INFO Image was created in Harvester with display name Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2 and id image-a9b2f
+```
+
+Pass `--namespace` or `--storage-class` to skip the matching prompt. The `KEY` column shows the shell-friendly identifier to use with `catalog list <key>` and `catalog create <key>/<version>`.
+
+#### `catalog list` — non-interactive listing
+
+```bash
+harvester image catalog list [OS] [--metadata-url URL]
+```
+
+Prints catalog entries without prompting. The full listing shows both the pretty `NAME` (label) and the `OS` key (used by scripts). Pass an OS key to filter to a single group.
+
+```bash
+# Full catalog
+harvester image catalog list
+# NAME             OS               VERSION  BUILD    SHORT NAME        URL
+# AlmaLinux        almalinux        10       latest   AlmaLinux 10      https://...
+# ...
+# openSUSE Leap    opensuse-leap    16.0     latest   openSUSE Leap 16.0  https://...
+# ...
+
+# Just Fedora
+harvester image catalog list fedora
+# Images for Fedora (fedora):
+#
+# VERSION  BUILD  SHORT NAME       URL
+# 44       1.7    Fedora Cloud 44  https://...
+# 43       1.6    Fedora Cloud 43  https://...
+# 42       1.1    Fedora Cloud 42  https://...
+```
+
+#### `catalog create` — scripted image creation
+
+```bash
+harvester image catalog create <OS>/<VERSION> \
+  [--namespace NS] [--storage-class SC] [--display-name NAME] \
+  [--description TEXT] [--dry-run] [--metadata-url URL]
+```
+
+Creates a VM image from a catalog entry by `<os>/<version>` selector (e.g. `fedora/44`, `opensuse-leap/16.0`, `rocky-linux/9.5`). No prompts — flag values are used as-is. Empty `--storage-class` means "use the cluster default StorageClass". When multiple builds share the same version, the last entry in the catalog array wins (arrays are ordered oldest → newest) and the choice is logged.
+
+```bash
+# Create with cluster default StorageClass
+harvester image catalog create fedora/44
+
+# Explicit namespace + StorageClass + friendly display name
+harvester image catalog create --namespace prod --storage-class tworeplicas \
+  --display-name ubuntu-noble-base ubuntu/24.04
+
+# Preview the YAML manifest without creating (GitOps-friendly)
+harvester image catalog create --dry-run --storage-class tworeplicas debian/12
+
+# openSUSE Leap 16 / Rocky 10 examples
+harvester image catalog create --storage-class tworeplicas opensuse-leap/16.0
+harvester image catalog create --storage-class tworeplicas rocky-linux/10
+
+# Use a private mirror as the source
+harvester image catalog create --metadata-url https://mirror.internal/catalog.json centos-stream/9
+```
+
+Error messages point you to what's available if you get the selector wrong:
+
+```
+$ harvester image catalog create ubuntu/99
+FATA no image with version "99" for ubuntu. Available versions: 25.10, 25.04, 24.10, 24.04, 22.04, 20.04
+
+$ harvester image catalog create nonexistent/1.0
+FATA unknown OS "nonexistent". Available: almalinux, centos-stream, debian, fedora, opensuse-leap, opensuse-microos, opensuse-tumbleweed, rocky-linux, ubuntu
+```
+
+> **Flag ordering:** because of a urfave/cli v2 quirk, flags must appear **before** the positional selector: `create --dry-run ubuntu/24.04` — not `create ubuntu/24.04 --dry-run`.
 
 ---
 
