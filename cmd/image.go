@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -129,6 +130,59 @@ func ImageCommand() *cli.Command {
 						EnvVars:  []string{"HARVESTER_CATALOG_METADATA"},
 						Required: false,
 						Value:    defaultCatalogSource,
+					},
+				},
+				Subcommands: cli.Commands{
+					&cli.Command{
+						Name:        "list",
+						Aliases:     []string{"ls"},
+						Usage:       "List catalog images non-interactively (optionally filter by OS)",
+						Description: "\nPrints the catalog entries without prompting. Pass an OS key (e.g. fedora) to filter.",
+						ArgsUsage:   "[OS]",
+						Action:      imageCatalogList,
+						Flags: []cli.Flag{
+							&cli.StringFlag{
+								Name:    "metadata-url",
+								Usage:   "Location from which to get the metadata JSON file",
+								EnvVars: []string{"HARVESTER_CATALOG_METADATA"},
+								Value:   defaultCatalogSource,
+							},
+						},
+					},
+					&cli.Command{
+						Name:        "create",
+						Aliases:     []string{"add"},
+						Usage:       "Create a VM image from the catalog by <os>/<version> selector",
+						Description: "\nCreates a VM image from a catalog entry (e.g. fedora/43, ubuntu/24.04). Uses the cluster's default StorageClass unless --storage-class is provided.",
+						ArgsUsage:   "<OS>/<VERSION>",
+						Action:      imageCatalogCreate,
+						Flags: []cli.Flag{
+							&nsFlag,
+							&cli.StringFlag{
+								Name:    "storage-class",
+								Usage:   "StorageClass to use for the image (defaults to the cluster's default StorageClass)",
+								EnvVars: []string{"HARVESTER_VM_IMAGE_SC"},
+							},
+							&cli.StringFlag{
+								Name:  "display-name",
+								Usage: "Display name for the image (defaults to the filename from the catalog URL)",
+							},
+							&cli.StringFlag{
+								Name:    "description",
+								Usage:   "Description of the VM Image",
+								EnvVars: []string{"HARVESTER_VM_IMAGE_DESCRIPTION"},
+							},
+							&cli.BoolFlag{
+								Name:  "dry-run",
+								Usage: "Print the YAML manifest that would be submitted without creating the resource",
+							},
+							&cli.StringFlag{
+								Name:    "metadata-url",
+								Usage:   "Location from which to get the metadata JSON file",
+								EnvVars: []string{"HARVESTER_CATALOG_METADATA"},
+								Value:   defaultCatalogSource,
+							},
+						},
 					},
 				},
 			},
@@ -393,28 +447,55 @@ func getHarvesterAPIFromConfig(ctx *cli.Context) (serverConfig *config.ServerCon
 
 }
 
-func imageCatalog(ctx *cli.Context) (err error) {
-
-	metadataUrl := ctx.String("metadata-url")
-
+// fetchCatalog downloads and parses the image metadata JSON from the given URL.
+func fetchCatalog(metadataUrl string) (*Catalog, error) {
 	logrus.Debug("current metadata url: " + metadataUrl)
 
-	var resp *http.Response
-	resp, err = http.Get(metadataUrl)
+	resp, err := http.Get(metadataUrl)
 	if err != nil {
-		return
+		return nil, fmt.Errorf("fetching catalog metadata: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetching catalog metadata: HTTP %s", resp.Status)
 	}
 
-	defer resp.Body.Close()
-	var body []byte
-	body, err = io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return
+		return nil, fmt.Errorf("reading catalog body: %w", err)
 	}
 
 	var catalog Catalog
-	err = json.Unmarshal(body, &catalog)
+	if err := json.Unmarshal(body, &catalog); err != nil {
+		return nil, fmt.Errorf("parsing catalog JSON: %w", err)
+	}
+	return &catalog, nil
+}
 
+// catalogOSKeys returns the OS keys of the catalog in stable (sorted) order.
+func catalogOSKeys(c *Catalog) []string {
+	keys := make([]string, 0, len(c.HarvesterImageCatalog))
+	for k := range c.HarvesterImageCatalog {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// filenameFromURL returns the last path segment of a URL, suitable as a display name.
+func filenameFromURL(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL %q: %w", rawURL, err)
+	}
+	parts := strings.Split(u.EscapedPath(), "/")
+	return parts[len(parts)-1], nil
+}
+
+func imageCatalog(ctx *cli.Context) (err error) {
+
+	catalog, err := fetchCatalog(ctx.String("metadata-url"))
 	if err != nil {
 		return
 	}
@@ -496,5 +577,140 @@ func imageCatalog(ctx *cli.Context) (err error) {
 
 	logrus.Infof("Image was created in Harvester with display name %s and id %s", imageFilename, imageCreatedName)
 
+	return nil
+}
+
+// imageCatalogList prints catalog entries non-interactively. Optional first arg filters by OS key.
+func imageCatalogList(ctx *cli.Context) error {
+	catalog, err := fetchCatalog(ctx.String("metadata-url"))
+	if err != nil {
+		return err
+	}
+
+	if ctx.NArg() > 0 {
+		osKey := ctx.Args().First()
+		entries, ok := catalog.HarvesterImageCatalog[osKey]
+		if !ok {
+			return fmt.Errorf("unknown OS %q. Available: %s", osKey, strings.Join(catalogOSKeys(catalog), ", "))
+		}
+		writer := rcmd.NewTableWriter([][]string{
+			{"VERSION", "Version"},
+			{"BUILD", "Build"},
+			{"SHORT NAME", "ShortName"},
+			{"URL", "Url"},
+		}, ctxv1)
+		defer writer.Close()
+		for _, e := range entries {
+			entry := e
+			writer.Write(&entry)
+		}
+		return writer.Err()
+	}
+
+	type catalogRow struct {
+		OS        string
+		Version   string
+		Build     string
+		ShortName string
+		Url       string
+	}
+	writer := rcmd.NewTableWriter([][]string{
+		{"OS", "OS"},
+		{"VERSION", "Version"},
+		{"BUILD", "Build"},
+		{"SHORT NAME", "ShortName"},
+		{"URL", "Url"},
+	}, ctxv1)
+	defer writer.Close()
+
+	for _, osKey := range catalogOSKeys(catalog) {
+		for _, e := range catalog.HarvesterImageCatalog[osKey] {
+			writer.Write(&catalogRow{
+				OS:        osKey,
+				Version:   e.Version,
+				Build:     e.Build,
+				ShortName: e.ShortName,
+				Url:       e.Url,
+			})
+		}
+	}
+	return writer.Err()
+}
+
+// imageCatalogCreate creates a VM image from a catalog entry selected by <os>/<version>.
+// If multiple entries share the same version (e.g. multiple Rocky Linux 9.5 builds), the last
+// match wins — catalog arrays are ordered oldest→newest.
+func imageCatalogCreate(ctx *cli.Context) error {
+	if ctx.NArg() != 1 {
+		return fmt.Errorf("expected exactly one argument in the form <os>/<version> (e.g. fedora/43)")
+	}
+	selector := ctx.Args().First()
+	parts := strings.SplitN(selector, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("selector must be in the form <os>/<version> (got %q)", selector)
+	}
+	osKey, version := parts[0], parts[1]
+
+	catalog, err := fetchCatalog(ctx.String("metadata-url"))
+	if err != nil {
+		return err
+	}
+
+	entries, ok := catalog.HarvesterImageCatalog[osKey]
+	if !ok {
+		return fmt.Errorf("unknown OS %q. Available: %s", osKey, strings.Join(catalogOSKeys(catalog), ", "))
+	}
+
+	var matches []CatalogEntry
+	for _, e := range entries {
+		if e.Version == version {
+			matches = append(matches, e)
+		}
+	}
+	if len(matches) == 0 {
+		seen := map[string]struct{}{}
+		var versions []string
+		for _, e := range entries {
+			if _, ok := seen[e.Version]; ok {
+				continue
+			}
+			seen[e.Version] = struct{}{}
+			versions = append(versions, e.Version)
+		}
+		return fmt.Errorf("no image with version %q for %s. Available versions: %s", version, osKey, strings.Join(versions, ", "))
+	}
+	chosen := matches[len(matches)-1]
+	if len(matches) > 1 {
+		logrus.Infof("Multiple builds (%d) for %s/%s; using build %q", len(matches), osKey, version, chosen.Build)
+	}
+
+	logrus.Infof("Selected: %s (build %s)", chosen.ShortName, chosen.Build)
+	logrus.Infof("URL: %s", chosen.Url)
+
+	displayName := ctx.String("display-name")
+	if displayName == "" {
+		displayName, err = filenameFromURL(chosen.Url)
+		if err != nil {
+			return err
+		}
+	}
+
+	if sc := ctx.String("storage-class"); sc == "" {
+		logrus.Info("Using cluster default StorageClass")
+	} else {
+		logrus.Infof("Using StorageClass: %s", sc)
+	}
+	logrus.Infof("Namespace: %s", ctx.String("namespace"))
+
+	imageID, err := createImageObjectInAPI(ctx, displayName, "download", chosen.Url)
+	if err != nil {
+		return fmt.Errorf("creating image in Harvester: %w", err)
+	}
+
+	if ctx.Bool("dry-run") {
+		return nil
+	}
+
+	logrus.Infof("Image was created in Harvester with display name %s and id %s", displayName, imageID)
 	return nil
 }
