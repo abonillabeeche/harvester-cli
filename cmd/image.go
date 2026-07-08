@@ -119,11 +119,16 @@ func ImageCommand() *cli.Command {
 				Name:        "catalog",
 				Aliases:     []string{"cat"},
 				Usage:       "lists an image catalog",
-				Description: "\nShows a list of freely available linux images to download from URLs",
+				Description: "\nShows a list of freely available linux images to download from URLs. If --namespace or --storage-class are not provided, the user is prompted interactively to pick from what exists on the cluster.",
 				ArgsUsage:   "",
 				Action:      imageCatalog,
 				Flags: []cli.Flag{
 					&nsFlag,
+					&cli.StringFlag{
+						Name:    "storage-class",
+						Usage:   "StorageClass to use for the image (interactive prompt if omitted)",
+						EnvVars: []string{"HARVESTER_VM_IMAGE_SC"},
+					},
 					&cli.StringFlag{
 						Name:     "metadata-url",
 						Usage:    "Location from which to get the metadata JSON file",
@@ -561,14 +566,38 @@ func imageCatalog(ctx *cli.Context) (err error) {
 
 	imageUrl := imageChoiceMap[int64(selection)]
 	fmt.Printf("\nYour image URL is : %s\n", imageUrl)
-	imageUrlObject, err := url.Parse(imageUrl)
 
+	imageFilename, err := filenameFromURL(imageUrl)
 	if err != nil {
-		return fmt.Errorf("the url parsed from the metadata file is invalid, %w", err)
+		return err
 	}
 
-	urlPathComponents := strings.Split(imageUrlObject.EscapedPath(), "/")
-	imageFilename := urlPathComponents[len(urlPathComponents)-1]
+	if !ctx.IsSet("namespace") {
+		chosenNs, err := promptForNamespaceSelection(ctx, reader)
+		if err != nil {
+			return err
+		}
+		if err := ctx.Set("namespace", chosenNs); err != nil {
+			return fmt.Errorf("setting namespace flag: %w", err)
+		}
+	}
+
+	if !ctx.IsSet("storage-class") {
+		chosenSC, err := promptForStorageClassSelection(ctx, reader)
+		if err != nil {
+			return err
+		}
+		if err := ctx.Set("storage-class", chosenSC); err != nil {
+			return fmt.Errorf("setting storage-class flag: %w", err)
+		}
+	}
+
+	sc := ctx.String("storage-class")
+	if sc == "" {
+		logrus.Infof("Creating image %q in namespace %q using cluster default StorageClass", imageFilename, ctx.String("namespace"))
+	} else {
+		logrus.Infof("Creating image %q in namespace %q with StorageClass %q", imageFilename, ctx.String("namespace"), sc)
+	}
 
 	imageCreatedName, err := createImageObjectInAPI(ctx, imageFilename, "download", imageUrl)
 	if err != nil {
@@ -578,6 +607,96 @@ func imageCatalog(ctx *cli.Context) (err error) {
 	logrus.Infof("Image was created in Harvester with display name %s and id %s", imageFilename, imageCreatedName)
 
 	return nil
+}
+
+// promptForNamespaceSelection lists namespaces that exist on the cluster and returns the
+// one the user picks. Used by the interactive `image catalog` flow.
+func promptForNamespaceSelection(ctx *cli.Context, reader *bufio.Reader) (string, error) {
+	kube, err := GetKubeClient(ctx)
+	if err != nil {
+		return "", fmt.Errorf("getting kube client to list namespaces: %w", err)
+	}
+	nsList, err := kube.CoreV1().Namespaces().List(context.TODO(), k8smetav1.ListOptions{})
+	if err != nil {
+		return "", fmt.Errorf("listing namespaces: %w", err)
+	}
+	if len(nsList.Items) == 0 {
+		return "", fmt.Errorf("no namespaces returned from cluster")
+	}
+
+	type nsRow struct {
+		Id   int64
+		Name string
+	}
+	writer := rcmd.NewTableWriter([][]string{
+		{"NUMBER", "Id"},
+		{"NAME", "Name"},
+	}, ctxv1)
+	nsChoiceMap := make(map[int64]string)
+	var i int64
+	for _, n := range nsList.Items {
+		i++
+		writer.Write(&nsRow{Id: i, Name: n.Name})
+		nsChoiceMap[i] = n.Name
+	}
+	writer.Close()
+
+	fmt.Println("\nInsert a number to select the namespace: ")
+	sel, err := GetSelectionFromInput(reader, len(nsChoiceMap))
+	if err != nil {
+		return "", err
+	}
+	return nsChoiceMap[int64(sel)], nil
+}
+
+// promptForStorageClassSelection lists StorageClasses on the cluster (with the cluster
+// default marked "*"), plus a sentinel "(use cluster default)" option that maps to empty
+// string. Returns the chosen SC name (empty means: let Harvester use the cluster default).
+func promptForStorageClassSelection(ctx *cli.Context, reader *bufio.Reader) (string, error) {
+	kube, err := GetKubeClient(ctx)
+	if err != nil {
+		return "", fmt.Errorf("getting kube client to list StorageClasses: %w", err)
+	}
+	scList, err := kube.StorageV1().StorageClasses().List(context.TODO(), k8smetav1.ListOptions{})
+	if err != nil {
+		return "", fmt.Errorf("listing StorageClasses: %w", err)
+	}
+	if len(scList.Items) == 0 {
+		logrus.Warn("no StorageClasses found on cluster; using cluster default (empty)")
+		return "", nil
+	}
+
+	type scRow struct {
+		Id      int64
+		Name    string
+		Default string
+	}
+	writer := rcmd.NewTableWriter([][]string{
+		{"NUMBER", "Id"},
+		{"NAME", "Name"},
+		{"DEFAULT", "Default"},
+	}, ctxv1)
+	scChoiceMap := make(map[int64]string)
+	var i int64 = 1
+	writer.Write(&scRow{Id: i, Name: "(use cluster default)", Default: ""})
+	scChoiceMap[i] = ""
+	for _, sc := range scList.Items {
+		i++
+		def := ""
+		if sc.Annotations["storageclass.kubernetes.io/is-default-class"] == "true" {
+			def = "*"
+		}
+		writer.Write(&scRow{Id: i, Name: sc.Name, Default: def})
+		scChoiceMap[i] = sc.Name
+	}
+	writer.Close()
+
+	fmt.Println("\nInsert a number to select the StorageClass (* = cluster default): ")
+	sel, err := GetSelectionFromInput(reader, len(scChoiceMap))
+	if err != nil {
+		return "", err
+	}
+	return scChoiceMap[int64(sel)], nil
 }
 
 // imageCatalogList prints catalog entries non-interactively. Optional first arg filters by OS key.
