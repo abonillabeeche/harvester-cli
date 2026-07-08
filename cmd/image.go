@@ -500,7 +500,10 @@ func filenameFromURL(rawURL string) (string, error) {
 
 func imageCatalog(ctx *cli.Context) (err error) {
 
-	catalog, err := fetchCatalog(ctx.String("metadata-url"))
+	metadataUrl := ctx.String("metadata-url")
+	fmt.Printf("Image catalog source: %s\n\n", metadataUrl)
+
+	catalog, err := fetchCatalog(metadataUrl)
 	if err != nil {
 		return
 	}
