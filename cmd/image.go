@@ -609,19 +609,46 @@ func imageCatalog(ctx *cli.Context) (err error) {
 	return nil
 }
 
-// promptForNamespaceSelection lists namespaces that exist on the cluster and returns the
-// one the user picks. Used by the interactive `image catalog` flow.
+// promptForText reads a line and returns it trimmed. If empty, returns defaultValue.
+// The prompt label already shown by the caller should include the "[default]" hint.
+func promptForText(reader *bufio.Reader, defaultValue string) (string, error) {
+	input, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return defaultValue, nil
+	}
+	return input, nil
+}
+
+// promptForNamespaceSelection tries to list namespaces from the cluster and show a picker.
+// If the caller lacks cluster-wide list permission (common with Rancher-proxied Harvester
+// kubeconfigs), it falls back to a free-form text prompt with the current --namespace value
+// as the default.
 func promptForNamespaceSelection(ctx *cli.Context, reader *bufio.Reader) (string, error) {
+	defaultNs := ctx.String("namespace")
+	if defaultNs == "" {
+		defaultNs = "default"
+	}
+
 	kube, err := GetKubeClient(ctx)
 	if err != nil {
-		return "", fmt.Errorf("getting kube client to list namespaces: %w", err)
+		logrus.Warnf("could not build kube client (%v); asking for namespace name instead", err)
+		fmt.Printf("\nEnter the namespace to create the image in [%s]: ", defaultNs)
+		return promptForText(reader, defaultNs)
 	}
 	nsList, err := kube.CoreV1().Namespaces().List(context.TODO(), k8smetav1.ListOptions{})
 	if err != nil {
-		return "", fmt.Errorf("listing namespaces: %w", err)
+		logrus.Warnf("could not list namespaces (%v); asking for namespace name instead", err)
+		fmt.Printf("\nEnter the namespace to create the image in [%s]: ", defaultNs)
+		return promptForText(reader, defaultNs)
 	}
 	if len(nsList.Items) == 0 {
-		return "", fmt.Errorf("no namespaces returned from cluster")
+		logrus.Warn("no namespaces returned; asking for namespace name instead")
+		fmt.Printf("\nEnter the namespace to create the image in [%s]: ", defaultNs)
+		return promptForText(reader, defaultNs)
 	}
 
 	type nsRow struct {
@@ -649,17 +676,20 @@ func promptForNamespaceSelection(ctx *cli.Context, reader *bufio.Reader) (string
 	return nsChoiceMap[int64(sel)], nil
 }
 
-// promptForStorageClassSelection lists StorageClasses on the cluster (with the cluster
-// default marked "*"), plus a sentinel "(use cluster default)" option that maps to empty
-// string. Returns the chosen SC name (empty means: let Harvester use the cluster default).
+// promptForStorageClassSelection tries to list StorageClasses and show a picker. Falls
+// back to a text prompt (empty input = cluster default) when listing fails.
 func promptForStorageClassSelection(ctx *cli.Context, reader *bufio.Reader) (string, error) {
 	kube, err := GetKubeClient(ctx)
 	if err != nil {
-		return "", fmt.Errorf("getting kube client to list StorageClasses: %w", err)
+		logrus.Warnf("could not build kube client (%v); asking for StorageClass name instead", err)
+		fmt.Print("\nEnter the StorageClass name (empty = cluster default): ")
+		return promptForText(reader, "")
 	}
 	scList, err := kube.StorageV1().StorageClasses().List(context.TODO(), k8smetav1.ListOptions{})
 	if err != nil {
-		return "", fmt.Errorf("listing StorageClasses: %w", err)
+		logrus.Warnf("could not list StorageClasses (%v); asking for StorageClass name instead", err)
+		fmt.Print("\nEnter the StorageClass name (empty = cluster default): ")
+		return promptForText(reader, "")
 	}
 	if len(scList.Items) == 0 {
 		logrus.Warn("no StorageClasses found on cluster; using cluster default (empty)")
