@@ -272,6 +272,12 @@
         "shortName": "Rocky Linux 9.5",
         "url": "https://dl.rockylinux.org/vault/rocky/9.5/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2",
         "build": "latest"
+      },
+      {
+        "version": "10",
+        "shortName": "Rocky Linux 10",
+        "url": "https://download.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-GenericCloud.latest.x86_64.qcow2",
+        "build": "latest"
       }
     ],
     "ubuntu": [
@@ -303,6 +309,68 @@
         "version": "24.10",
         "shortName": "Ubuntu oracular 24.10",
         "url": "https://cloud-images.ubuntu.com/minimal/releases/oracular/release/ubuntu-24.10-minimal-cloudimg-amd64.img",
+        "build": "latest"
+      },
+      {
+        "version": "25.04",
+        "shortName": "Ubuntu plucky 25.04",
+        "url": "https://cloud-images.ubuntu.com/minimal/releases/plucky/release/ubuntu-25.04-minimal-cloudimg-amd64.img",
+        "build": "latest"
+      }
+    ],
+    "fedora": [
+      {
+        "version": "43",
+        "shortName": "Fedora Cloud 43",
+        "url": "https://download.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2",
+        "build": "1.6"
+      },
+      {
+        "version": "42",
+        "shortName": "Fedora Cloud 42",
+        "url": "https://download.fedoraproject.org/pub/fedora/linux/releases/42/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-42-1.1.x86_64.qcow2",
+        "build": "1.1"
+      }
+    ],
+    "centos-stream": [
+      {
+        "version": "10",
+        "shortName": "CentOS Stream 10",
+        "url": "https://cloud.centos.org/centos/10-stream/x86_64/images/CentOS-Stream-GenericCloud-10-latest.x86_64.qcow2",
+        "build": "latest"
+      },
+      {
+        "version": "9",
+        "shortName": "CentOS Stream 9",
+        "url": "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2",
+        "build": "latest"
+      }
+    ],
+    "debian": [
+      {
+        "version": "13",
+        "shortName": "Debian 13 (trixie)",
+        "url": "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2",
+        "build": "latest"
+      },
+      {
+        "version": "12",
+        "shortName": "Debian 12 (bookworm)",
+        "url": "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2",
+        "build": "latest"
+      }
+    ],
+    "almalinux": [
+      {
+        "version": "9",
+        "shortName": "AlmaLinux 9",
+        "url": "https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2",
+        "build": "latest"
+      },
+      {
+        "version": "8",
+        "shortName": "AlmaLinux 8",
+        "url": "https://repo.almalinux.org/almalinux/8/cloud/x86_64/images/AlmaLinux-8-GenericCloud-latest.x86_64.qcow2",
         "build": "latest"
       }
     ]
