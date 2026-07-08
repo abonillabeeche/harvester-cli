@@ -49,11 +49,28 @@ type CatalogEntry struct {
 
 type Catalog struct {
 	HarvesterImageCatalog map[string][]CatalogEntry `json:"HarvesterImageCatalog"`
+	// HarvesterImageLabels maps OS keys (e.g. "opensuse-leap") to human-friendly
+	// display names (e.g. "openSUSE Leap"). Older catalog files without this map
+	// still work — the raw key is used as the display name.
+	HarvesterImageLabels map[string]string `json:"HarvesterImageLabels,omitempty"`
+}
+
+// LabelFor returns the human-friendly display name for an OS key, or the key itself
+// if the catalog does not carry an explicit label.
+func (c *Catalog) LabelFor(key string) string {
+	if c == nil {
+		return key
+	}
+	if label, ok := c.HarvesterImageLabels[key]; ok && label != "" {
+		return label
+	}
+	return key
 }
 
 type Os struct {
 	Id             int64
 	Name           string
+	Key            string
 	NumberOfImages string
 }
 
@@ -587,6 +604,7 @@ func imageCatalog(ctx *cli.Context) (err error) {
 	writer := rcmd.NewTableWriter([][]string{
 		{"NUMBER", "Id"},
 		{"NAME", "Name"},
+		{"KEY", "Key"},
 		{"NUMBER OF IMAGES", "NumberOfImages"},
 	},
 		ctxv1)
@@ -594,16 +612,16 @@ func imageCatalog(ctx *cli.Context) (err error) {
 	osChoiceMap := make(map[int64]string)
 	var i int64 = 0
 
-	for os, imageList := range catalog.HarvesterImageCatalog {
+	for _, osKey := range catalogOSKeys(catalog) {
 		i++
-		number := int64(len(imageList))
+		imageList := catalog.HarvesterImageCatalog[osKey]
 		writer.Write(&Os{
 			Id:             i,
-			Name:           os,
-			NumberOfImages: strconv.FormatInt(number, 10),
+			Name:           catalog.LabelFor(osKey),
+			Key:            osKey,
+			NumberOfImages: strconv.FormatInt(int64(len(imageList)), 10),
 		})
-		osChoiceMap[i] = os
-
+		osChoiceMap[i] = osKey
 	}
 
 	writer.Close()
@@ -617,7 +635,7 @@ func imageCatalog(ctx *cli.Context) (err error) {
 
 	osSelection := osChoiceMap[int64(selection)]
 
-	fmt.Printf("\nHere are the images available for %s\n\n", osSelection)
+	fmt.Printf("\nHere are the images available for %s\n\n", catalog.LabelFor(osSelection))
 
 	writer = rcmd.NewTableWriter([][]string{
 		{"NUMBER", "Id"},
@@ -821,6 +839,7 @@ func imageCatalogList(ctx *cli.Context) error {
 		if !ok {
 			return fmt.Errorf("unknown OS %q. Available: %s", osKey, strings.Join(catalogOSKeys(catalog), ", "))
 		}
+		fmt.Printf("Images for %s (%s):\n\n", catalog.LabelFor(osKey), osKey)
 		writer := rcmd.NewTableWriter([][]string{
 			{"VERSION", "Version"},
 			{"BUILD", "Build"},
@@ -836,6 +855,7 @@ func imageCatalogList(ctx *cli.Context) error {
 	}
 
 	type catalogRow struct {
+		Name      string
 		OS        string
 		Version   string
 		Build     string
@@ -843,6 +863,7 @@ func imageCatalogList(ctx *cli.Context) error {
 		Url       string
 	}
 	writer := rcmd.NewTableWriter([][]string{
+		{"NAME", "Name"},
 		{"OS", "OS"},
 		{"VERSION", "Version"},
 		{"BUILD", "Build"},
@@ -852,8 +873,10 @@ func imageCatalogList(ctx *cli.Context) error {
 	defer writer.Close()
 
 	for _, osKey := range catalogOSKeys(catalog) {
+		label := catalog.LabelFor(osKey)
 		for _, e := range catalog.HarvesterImageCatalog[osKey] {
 			writer.Write(&catalogRow{
+				Name:      label,
 				OS:        osKey,
 				Version:   e.Version,
 				Build:     e.Build,
