@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"os"
 	"path"
 	"regexp"
@@ -11,6 +12,9 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 )
+
+//go:embed image-metadata.json
+var embeddedCatalog []byte
 
 var VERSION = "dev"
 
@@ -88,6 +92,8 @@ func mainErr() error {
 		cmd.CompleteCommand(),
 	}
 	app.EnableBashCompletion = true
+
+	cmd.SetEmbeddedCatalog(embeddedCatalog)
 
 	parsed, err := parseArgs(os.Args)
 	if err != nil {

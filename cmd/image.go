@@ -139,6 +139,25 @@ func ImageCommand() *cli.Command {
 				},
 				Subcommands: cli.Commands{
 					&cli.Command{
+						Name:        "init",
+						Usage:       "Download the catalog metadata and cache it at ~/.harvester/image-metadata.json",
+						Description: "\nDownloads the catalog JSON from --metadata-url (default: the public GitHub raw URL) and stores it alongside the harvester CLI config. Future 'catalog' commands prefer this local cache automatically, so subsequent runs work offline. Pass --force to overwrite an existing cache.",
+						ArgsUsage:   "",
+						Action:      imageCatalogInit,
+						Flags: []cli.Flag{
+							&cli.StringFlag{
+								Name:    "metadata-url",
+								Usage:   "URL to download the catalog metadata JSON from",
+								EnvVars: []string{"HARVESTER_CATALOG_METADATA"},
+								Value:   defaultCatalogSource,
+							},
+							&cli.BoolFlag{
+								Name:  "force",
+								Usage: "Overwrite an existing cached catalog",
+							},
+						},
+					},
+					&cli.Command{
 						Name:        "list",
 						Aliases:     []string{"ls"},
 						Usage:       "List catalog images non-interactively (optionally filter by OS)",
@@ -452,23 +471,66 @@ func getHarvesterAPIFromConfig(ctx *cli.Context) (serverConfig *config.ServerCon
 
 }
 
-// fetchCatalog downloads and parses the image metadata JSON from the given URL.
-func fetchCatalog(metadataUrl string) (*Catalog, error) {
-	logrus.Debug("current metadata url: " + metadataUrl)
+// embeddedCatalog holds the image-metadata.json bundled with the binary. Populated by
+// main via SetEmbeddedCatalog so //go:embed can live in the root package.
+var embeddedCatalog []byte
 
-	resp, err := http.Get(metadataUrl)
+// SetEmbeddedCatalog injects the bundled image-metadata.json bytes from the main package.
+func SetEmbeddedCatalog(data []byte) {
+	embeddedCatalog = data
+}
+
+// localCatalogCachePath returns the on-disk path where `catalog init` stashes the metadata
+// JSON, or "" if the user's home directory can't be resolved.
+func localCatalogCachePath() string {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, fmt.Errorf("fetching catalog metadata: %w", err)
+		return ""
 	}
-	defer resp.Body.Close()
+	return filepath.Join(home, ".harvester", "image-metadata.json")
+}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetching catalog metadata: HTTP %s", resp.Status)
+// resolveCatalogSource picks which source to load the catalog from. Priority:
+//  1. --metadata-url flag or HARVESTER_CATALOG_METADATA env var explicitly set
+//  2. local cache at ~/.harvester/image-metadata.json if it exists
+//  3. the default remote URL (will fall back to the embedded bundle on HTTP failure)
+func resolveCatalogSource(ctx *cli.Context) string {
+	if ctx.IsSet("metadata-url") {
+		return ctx.String("metadata-url")
 	}
+	if p := localCatalogCachePath(); p != "" {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return defaultCatalogSource
+}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading catalog body: %w", err)
+// loadCatalog reads and parses catalog JSON from an HTTP(S) URL, file:// URL, or plain
+// filesystem path. If the source is HTTP(S) and the fetch fails, it falls back to the
+// binary's embedded catalog (with a warning) rather than erroring out — this is what
+// makes offline use possible without any manual setup.
+func loadCatalog(source string) (*Catalog, error) {
+	var body []byte
+	var err error
+
+	switch {
+	case strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://"):
+		body, err = httpFetch(source)
+		if err != nil {
+			if len(embeddedCatalog) == 0 {
+				return nil, err
+			}
+			logrus.Warnf("fetching catalog from %s failed (%v); using catalog bundled with the CLI", source, err)
+			body = embeddedCatalog
+		}
+	default:
+		path := strings.TrimPrefix(source, "file://")
+		logrus.Debugf("loading catalog from local file: %s", path)
+		body, err = os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading catalog file %s: %w", path, err)
+		}
 	}
 
 	var catalog Catalog
@@ -476,6 +538,20 @@ func fetchCatalog(metadataUrl string) (*Catalog, error) {
 		return nil, fmt.Errorf("parsing catalog JSON: %w", err)
 	}
 	return &catalog, nil
+}
+
+// httpFetch downloads bytes from an HTTP(S) URL, treating any non-200 status as an error.
+func httpFetch(source string) ([]byte, error) {
+	logrus.Debugf("fetching catalog over HTTP: %s", source)
+	resp, err := http.Get(source)
+	if err != nil {
+		return nil, fmt.Errorf("fetching catalog metadata: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetching catalog metadata: HTTP %s", resp.Status)
+	}
+	return io.ReadAll(resp.Body)
 }
 
 // catalogOSKeys returns the OS keys of the catalog in stable (sorted) order.
@@ -500,10 +576,10 @@ func filenameFromURL(rawURL string) (string, error) {
 
 func imageCatalog(ctx *cli.Context) (err error) {
 
-	metadataUrl := ctx.String("metadata-url")
-	fmt.Printf("Image catalog source: %s\n\n", metadataUrl)
+	source := resolveCatalogSource(ctx)
+	fmt.Printf("Image catalog source: %s\n\n", source)
 
-	catalog, err := fetchCatalog(metadataUrl)
+	catalog, err := loadCatalog(source)
 	if err != nil {
 		return
 	}
@@ -734,7 +810,7 @@ func promptForStorageClassSelection(ctx *cli.Context, reader *bufio.Reader) (str
 
 // imageCatalogList prints catalog entries non-interactively. Optional first arg filters by OS key.
 func imageCatalogList(ctx *cli.Context) error {
-	catalog, err := fetchCatalog(ctx.String("metadata-url"))
+	catalog, err := loadCatalog(resolveCatalogSource(ctx))
 	if err != nil {
 		return err
 	}
@@ -803,7 +879,7 @@ func imageCatalogCreate(ctx *cli.Context) error {
 	}
 	osKey, version := parts[0], parts[1]
 
-	catalog, err := fetchCatalog(ctx.String("metadata-url"))
+	catalog, err := loadCatalog(resolveCatalogSource(ctx))
 	if err != nil {
 		return err
 	}
@@ -864,5 +940,44 @@ func imageCatalogCreate(ctx *cli.Context) error {
 	}
 
 	logrus.Infof("Image was created in Harvester with display name %s and id %s", displayName, imageID)
+	return nil
+}
+
+// imageCatalogInit downloads the catalog JSON and writes it to ~/.harvester/image-metadata.json
+// so future 'catalog' commands can work offline. --force overwrites an existing cache.
+func imageCatalogInit(ctx *cli.Context) error {
+	source := ctx.String("metadata-url")
+
+	dest := localCatalogCachePath()
+	if dest == "" {
+		return fmt.Errorf("could not resolve home directory to place the catalog cache")
+	}
+
+	if _, err := os.Stat(dest); err == nil && !ctx.Bool("force") {
+		return fmt.Errorf("%s already exists; re-run with --force to overwrite", dest)
+	}
+
+	fmt.Printf("Downloading catalog from: %s\n", source)
+	fmt.Printf("Saving to:                %s\n\n", dest)
+
+	body, err := httpFetch(source)
+	if err != nil {
+		return err
+	}
+
+	var catalog Catalog
+	if err := json.Unmarshal(body, &catalog); err != nil {
+		return fmt.Errorf("downloaded content is not valid catalog JSON: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		return fmt.Errorf("creating %s: %w", filepath.Dir(dest), err)
+	}
+	if err := os.WriteFile(dest, body, 0644); err != nil {
+		return fmt.Errorf("writing %s: %w", dest, err)
+	}
+
+	fmt.Printf("Cached catalog with %d OS group(s). Future 'image catalog' runs will use this file automatically.\n", len(catalog.HarvesterImageCatalog))
+	fmt.Println("Re-run with --force to refresh.")
 	return nil
 }
