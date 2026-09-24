@@ -38,11 +38,16 @@ minus the two 1.9.0-only features below.
 - `vm start`/`vm stop` take several names, `vm restart` accepts `--vm-name`, `template show`
   degrades gracefully when the template's image is gone, `volume list` formats capacity
   consistently, and `network list` shows VLAN trunk ranges.
+- `volume list-storageclass` gained a `DEFAULT` column, and calls out a class marked default only
+  with the deprecated beta annotation — Harvester ignores it and later fails backing-image creates
+  with `no default storageClass found`.
+- The `import` subcommands explain the 404 they get when the `vm-import-controller` addon is
+  disabled, instead of just reporting that the resource does not exist.
 - `golangci-lint run` goes from 23 issues to 0.
 
 ## Verification
 
-Every command was exercised against two live Harvester v1.9.0 clusters, including a 3-node cluster
-running Ceph RBD and Longhorn v1 side by side: image creation on both backends, VM create from
-image and template, SSH into the booted guest, live migration between hosts, the full OVA import
-flow, and the new delete paths.
+Every command was exercised against three live Harvester v1.9.0 clusters, covering Ceph RBD,
+Longhorn v1 and Longhorn v2: image creation on both backends, VM create from image and template,
+SSH into the booted guest, live migration between hosts, the full OVA import flow, and the new
+delete paths.
