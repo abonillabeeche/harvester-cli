@@ -252,7 +252,7 @@ func getProjectContext(ctx *cli.Context, c *cliclient.MasterClient) (string, err
 		})
 	}
 
-	writer.Close()
+	_ = writer.Close()
 	if nil != writer.Err() {
 		return "", writer.Err()
 	}
@@ -289,7 +289,7 @@ func getCertFromServer(ctx *cli.Context, cf *config.ServerConfig) (*cliclient.Ma
 		return nil, err
 	}
 
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	content, err := io.ReadAll(res.Body)
 	if err != nil {
@@ -335,9 +335,10 @@ func verifyUserAcceptsCert(certs []string, url string) bool {
 		input := scanner.Text()
 		input = strings.ToLower(strings.TrimSpace(input))
 
-		if input == "yes" || input == "y" {
+		switch input {
+		case "yes", "y":
 			return true
-		} else if input == "no" || input == "n" {
+		case "no", "n":
 			return false
 		}
 		fmt.Printf("Please type 'yes' or 'no': ")

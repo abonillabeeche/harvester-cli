@@ -14,7 +14,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
@@ -78,7 +77,7 @@ func loadAndVerifyCert(path string) (string, error) {
 
 func verifyCert(caCert []byte) (string, error) {
 	// replace the escaped version of the line break
-	caCert = bytes.Replace(caCert, []byte(`\n`), []byte("\n"), -1)
+	caCert = bytes.ReplaceAll(caCert, []byte(`\n`), []byte("\n"))
 
 	block, _ := pem.Decode(caCert)
 
@@ -151,21 +150,21 @@ func GetClient(ctx *cli.Context) (*cliclient.MasterClient, error) {
 // GetResourceType maps an incoming resource type to a valid one from the schema
 func GetResourceType(c *cliclient.MasterClient, resource string) (string, error) {
 	if c.ManagementClient != nil {
-		for key := range c.ManagementClient.APIBaseClient.Types {
+		for key := range c.ManagementClient.Types {
 			if strings.EqualFold(key, resource) {
 				return key, nil
 			}
 		}
 	}
 	if c.ProjectClient != nil {
-		for key := range c.ProjectClient.APIBaseClient.Types {
+		for key := range c.ProjectClient.Types {
 			if strings.EqualFold(key, resource) {
 				return key, nil
 			}
 		}
 	}
 	if c.ClusterClient != nil {
-		for key := range c.ClusterClient.APIBaseClient.Types {
+		for key := range c.ClusterClient.Types {
 			if strings.EqualFold(key, resource) {
 				return key, nil
 			}
@@ -186,17 +185,17 @@ func Lookup(c *cliclient.MasterClient, name string, types ...string) (*ntypes.Re
 		var schemaClient clientbase.APIBaseClientInterface
 		// the schemaType dictates which client we need to use
 		if c.ManagementClient != nil {
-			if _, ok := c.ManagementClient.APIBaseClient.Types[rt]; ok {
+			if _, ok := c.ManagementClient.Types[rt]; ok {
 				schemaClient = c.ManagementClient
 			}
 		}
 		if c.ProjectClient != nil {
-			if _, ok := c.ProjectClient.APIBaseClient.Types[rt]; ok {
+			if _, ok := c.ProjectClient.Types[rt]; ok {
 				schemaClient = c.ProjectClient
 			}
 		}
 		if c.ClusterClient != nil {
-			if _, ok := c.ClusterClient.APIBaseClient.Types[rt]; ok {
+			if _, ok := c.ClusterClient.Types[rt]; ok {
 				schemaClient = c.ClusterClient
 			}
 		}
@@ -256,12 +255,46 @@ func Lookup(c *cliclient.MasterClient, name string, types ...string) (*ntypes.Re
 }
 
 func RandomName() string {
-	return strings.Replace(namesgenerator.GetRandomName(0), "_", "-", -1)
+	return strings.ReplaceAll(namesgenerator.GetRandomName(0), "_", "-")
+}
+
+// RejectFlagsAfterArgs fails a command when a flag was given after the first positional argument.
+// Go's flag package stops parsing at the first non-flag token, so `vm create my-vm --dry-run`
+// silently drops --dry-run and creates the VM for real. Refusing to run is a lot better than
+// quietly doing the opposite of what was asked.
+func RejectFlagsAfterArgs(ctx *cli.Context) error {
+	for _, arg := range ctx.Args().Slice() {
+		if len(arg) > 1 && strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("flag %q was given after a positional argument and would be ignored, put every flag before the argument", arg)
+		}
+	}
+	return nil
+}
+
+// GuardFlagOrder attaches RejectFlagsAfterArgs to every leaf command of the tree, chaining it in
+// front of any Before the command already has.
+func GuardFlagOrder(commands []*cli.Command) {
+	for _, command := range commands {
+		if len(command.Subcommands) > 0 {
+			GuardFlagOrder(command.Subcommands)
+			continue
+		}
+		existingBefore := command.Before
+		command.Before = func(ctx *cli.Context) error {
+			if err := RejectFlagsAfterArgs(ctx); err != nil {
+				return err
+			}
+			if existingBefore != nil {
+				return existingBefore(ctx)
+			}
+			return nil
+		}
+	}
 }
 
 // RandomLetters returns a string with random letters of length n
 func RandomLetters(n int) string {
-	rand.Seed(time.Now().UnixNano())
+	// The global source is seeded randomly since Go 1.20, rand.Seed is gone.
 	b := make([]byte, n)
 	for i := range b {
 		b[i] = letters[rand.Intn(len(letters))]
@@ -506,7 +539,9 @@ func HandleMemoryOverCommittment(overCommitSettingMap map[string]int, memory str
 	return *resource.NewQuantity(memoryValue*100/int64(overCommitSettingMap["memory"]), resource.BinarySI)
 }
 
-// MergeOptionsInUserData merges the default user data and the provided public key with the user data provided by the user
+// MergeOptionsInUserData merges the default user data and the provided public key with the user data provided by the user.
+// The merge is idempotent: entries already present in the user data are never added a second time, so passing the
+// default user data as the user data (which is what happens when no --user-data-* flag is given) is a no-op.
 func MergeOptionsInUserData(userData string, defaultUserData string, sshKey *v1beta1.KeyPair) (string, error) {
 	var err error
 	var userDataMap map[string]interface{}
@@ -522,27 +557,24 @@ func MergeOptionsInUserData(userData string, defaultUserData string, sshKey *v1b
 		return "", err
 	}
 
-	if (userDataMap["ssh_authorized_keys"] != nil && sshKey != nil && sshKey != &v1beta1.KeyPair{}) {
-		sshKeyList := userDataMap["ssh_authorized_keys"].([]interface{})
-		sshKeyList = append(sshKeyList, sshKey.Spec.PublicKey)
-
-		userDataMap["ssh_authorized_keys"] = sshKeyList
+	if userDataMap == nil {
+		userDataMap = map[string]interface{}{}
 	}
 
-	if userDataMap["packages"] != nil {
-		packagesList := userDataMap["packages"].([]interface{})
-		packagesList = append(packagesList, defaultUserDataMap["packages"].([]interface{})...)
-		userDataMap["packages"] = packagesList
-	} else {
-		userDataMap["packages"] = defaultUserDataMap["packages"]
+	// The SSH key has to land in ssh_authorized_keys, otherwise cloud-init never installs it and the
+	// VM is unreachable -- Harvester only records the key name in the harvesterhci.io/sshNames annotation.
+	if sshKey != nil && sshKey.Spec.PublicKey != "" {
+		userDataMap["ssh_authorized_keys"] = appendMissing(toSlice(userDataMap["ssh_authorized_keys"]), sshKey.Spec.PublicKey)
 	}
 
-	if userDataMap["runcmd"] != nil {
-		runcmdList := defaultUserDataMap["runcmd"].([]interface{})
-		runcmdList = append(runcmdList, userDataMap["runcmd"].([]interface{})...)
-		userDataMap["runcmd"] = runcmdList
-	} else {
-		userDataMap["runcmd"] = defaultUserDataMap["runcmd"]
+	userDataMap["packages"] = appendMissing(toSlice(userDataMap["packages"]), toSlice(defaultUserDataMap["packages"])...)
+	// The default runcmd entries install and start the guest agent, they have to run before anything the user asked for.
+	userDataMap["runcmd"] = appendMissing(toSlice(defaultUserDataMap["runcmd"]), toSlice(userDataMap["runcmd"])...)
+
+	for _, key := range []string{"ssh_authorized_keys", "packages", "runcmd"} {
+		if len(toSlice(userDataMap[key])) == 0 {
+			delete(userDataMap, key)
+		}
 	}
 
 	mergedUserData, err := yaml.Marshal(userDataMap)
@@ -555,6 +587,43 @@ func MergeOptionsInUserData(userData string, defaultUserData string, sshKey *v1b
 
 	return finalUserData, nil
 
+}
+
+// toSlice normalises a cloud-init value that is expected to be a list into a []interface{}.
+// A scalar is wrapped in a single-element slice, anything absent becomes nil.
+func toSlice(value interface{}) []interface{} {
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case []interface{}:
+		return v
+	default:
+		return []interface{}{v}
+	}
+}
+
+// appendMissing appends the given entries to list, skipping any that are already there.
+// Entries are compared by their YAML rendering so that list-form runcmd entries compare correctly.
+func appendMissing(list []interface{}, entries ...interface{}) []interface{} {
+	seen := make(map[string]bool, len(list)+len(entries))
+	key := func(entry interface{}) string {
+		encoded, err := yaml.Marshal(entry)
+		if err != nil {
+			return fmt.Sprintf("%#v", entry)
+		}
+		return string(encoded)
+	}
+
+	for _, entry := range list {
+		seen[key(entry)] = true
+	}
+	for _, entry := range entries {
+		if k := key(entry); !seen[k] {
+			seen[k] = true
+			list = append(list, entry)
+		}
+	}
+	return list
 }
 
 // toYAML marshals a Kubernetes object to YAML using its JSON field tags.
@@ -583,4 +652,3 @@ func getNamespaceAndName(ctx *cli.Context, resourceName string) (resourceNS stri
 
 	return "", "", errors.New("could not determine namespace from resource name or context")
 }
-

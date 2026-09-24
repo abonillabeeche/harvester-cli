@@ -91,7 +91,7 @@ func hostList(ctx *cli.Context) error {
 		{"MEM%", "MemPct"},
 		{"MEM TOTAL", "MemTotal"},
 	}, ctxv1)
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 
 	for i := range nodes.Items {
 		node := &nodes.Items[i]

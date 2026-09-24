@@ -19,6 +19,29 @@ var (
 	harvesterMigrationAPIGroup = "migration.harvesterhci.io/v1beta1"
 )
 
+// sourceClusterTypes maps the value of --source-cluster-type to the API resource that backs it and
+// the kind a VirtualMachineImport has to reference. Harvester v1.9.0 adds "ova" to the two source
+// types that existed before.
+var sourceClusterTypes = map[string]struct {
+	resource string
+	kind     string
+}{
+	"vmware":    {resource: "vmwaresources", kind: "VmwareSource"},
+	"openstack": {resource: "openstacksources", kind: "OpenstackSource"},
+	"ova":       {resource: "ovasources", kind: "OvaSource"},
+}
+
+const sourceClusterTypeUsage = "Type of the source cluster to import the VM from, this can take values of 'vmware', 'openstack' or 'ova'"
+
+// resolveSourceClusterType looks up the API resource and kind for a --source-cluster-type value.
+func resolveSourceClusterType(sourceType string) (resource string, kind string, err error) {
+	entry, found := sourceClusterTypes[sourceType]
+	if !found {
+		return "", "", fmt.Errorf("invalid source cluster type: %v, must be \"openstack\", \"vmware\" or \"ova\"", sourceType)
+	}
+	return entry.resource, entry.kind, nil
+}
+
 type VMImportData struct {
 	Name          string
 	VMName        string
@@ -84,7 +107,7 @@ func importCreateCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:     "source-cluster-type",
-				Usage:    "Type of the source cluster to import the VM from, this can take values of 'vmware' or 'openstack'",
+				Usage:    sourceClusterTypeUsage,
 				Required: true,
 				EnvVars:  []string{"HARVESTER_IMPORT_SOURCE_CLUSTER_TYPE"},
 				Value:    "vmware",
@@ -108,7 +131,7 @@ func importSourceAddCommand() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:     "source-cluster-type",
-				Usage:    "Type of the source cluster to import the VM from, this can take values of 'vmware' or 'openstack'",
+				Usage:    sourceClusterTypeUsage,
 				Required: true,
 				EnvVars:  []string{"HARVESTER_IMPORT_SOURCE_CLUSTER_TYPE"},
 				Value:    "vmware",
@@ -121,9 +144,15 @@ func importSourceAddCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:     "endpoint",
-				Usage:    "Endpoint of the source cluster",
+				Usage:    "Endpoint of the source cluster, for the 'ova' type this is the URL the OVA files are served from",
 				Required: true,
 				EnvVars:  []string{"HARVESTER_IMPORT_SOURCE_CLUSTER_ENDPOINT"},
+			},
+			&cli.IntFlag{
+				Name:    "http-timeout",
+				Usage:   "Download timeout in seconds for the 'ova' source type, 0 means no timeout",
+				EnvVars: []string{"HARVESTER_IMPORT_SOURCE_CLUSTER_HTTP_TIMEOUT"},
+				Value:   VMImportV1.DefaultHttpTimeoutSeconds,
 			},
 			&cli.StringFlag{
 				Name:     "dc",
@@ -138,10 +167,11 @@ func importSourceAddCommand() *cli.Command {
 				EnvVars:  []string{"HARVESTER_IMPORT_SOURCE_CLUSTER_REGION"},
 			},
 			&cli.StringFlag{
-				Name:     "credentials-secret",
-				Usage:    "Reference to the secret containing credentials for the source cluster in the format: <namespace>/<secret-name>",
-				Required: true,
-				EnvVars:  []string{"HARVESTER_IMPORT_SOURCE_CLUSTER_CREDENTIALS_SECRET"},
+				Name: "credentials-secret",
+				// Optional only for the 'ova' type, which can read from an unauthenticated server.
+				// configureVMImport rejects a missing secret for the other types.
+				Usage:   "Reference to the secret containing credentials for the source cluster in the format: <namespace>/<secret-name>. Optional for the 'ova' source type",
+				EnvVars: []string{"HARVESTER_IMPORT_SOURCE_CLUSTER_CREDENTIALS_SECRET"},
 			},
 		},
 		Action: configureVMImport,
@@ -162,8 +192,10 @@ func importSourceDeleteCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:    "source-cluster-type",
-				Usage:   "Type of the source cluster to import the VM from, this can take values of 'vmware' or 'openstack'",
+				Usage:   sourceClusterTypeUsage,
 				Aliases: []string{"type"},
+				EnvVars: []string{"HARVESTER_IMPORT_SOURCE_CLUSTER_TYPE"},
+				Value:   "vmware",
 			},
 		},
 	}
@@ -240,7 +272,7 @@ func listVMImports(ctx *cli.Context) error {
 		{"CLUSTER_TYPE", "ClusterType"},
 	}, ctxv1)
 
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 
 	for _, vmImport := range vmImportList.Items {
 		writer.Write(&VMImportData{
@@ -267,14 +299,39 @@ func configureVMImport(ctx *cli.Context) error {
 		return err
 	}
 
-	credentialsNS, credentialsName, err := getNamespaceAndName(ctx, ctx.String("credentials-secret"))
+	sourceType := ctx.String("source-cluster-type")
+
+	resourceType, _, err := resolveSourceClusterType(sourceType)
 	if err != nil {
-		return fmt.Errorf("failed to get namespace and name of the secret: %v", err)
+		return err
 	}
 
-	var resourceType string
+	// Only the 'ova' source type can go without credentials, the other two have a non-optional
+	// credentials field in their spec.
+	var credentials *corev1.SecretReference
+	if secret := ctx.String("credentials-secret"); secret != "" {
+		credentialsNS, credentialsName, err := getNamespaceAndName(ctx, secret)
+		if err != nil {
+			return fmt.Errorf("failed to get namespace and name of the secret: %v", err)
+		}
+		credentials = &corev1.SecretReference{
+			Name:      credentialsName,
+			Namespace: credentialsNS,
+		}
+	} else if sourceType != "ova" {
+		return fmt.Errorf("credentials-secret is required for %s source cluster type", sourceType)
+	}
+
+	// The API server rejects a body whose metadata.namespace differs from the namespace in the
+	// request URL, so both have to come from --source-cluster-namespace.
+	objectMeta := v1.ObjectMeta{
+		Name:      ctx.Args().First(),
+		Namespace: ctx.String("source-cluster-namespace"),
+	}
+
 	var createVMSourceBody []byte
-	if ctx.String("source-cluster-type") == "vmware" {
+	switch sourceType {
+	case "vmware":
 		if ctx.String("region") != "" {
 			return fmt.Errorf("region is not supported for vmware source cluster type")
 		}
@@ -282,24 +339,17 @@ func configureVMImport(ctx *cli.Context) error {
 		if ctx.String("dc") == "" {
 			return fmt.Errorf("dc is required for vmware source cluster type")
 		}
-		resourceType = "vmwaresources"
 		vmWareSource := VMImportV1.VmwareSource{
 			TypeMeta: v1.TypeMeta{
 				Kind:       "VmwareSource",
 				APIVersion: harvesterMigrationAPIGroup,
 			},
-			ObjectMeta: v1.ObjectMeta{
-				Name:      ctx.Args().First(),
-				Namespace: "harvester-system",
-			},
+			ObjectMeta: objectMeta,
 			Spec: VMImportV1.VmwareSourceSpec{
 
 				EndpointAddress: ctx.String("endpoint"),
 				Datacenter:      ctx.String("dc"),
-				Credentials: corev1.SecretReference{
-					Name:      credentialsName,
-					Namespace: credentialsNS,
-				},
+				Credentials:     *credentials,
 			},
 		}
 		createVMSourceBody, err = json.Marshal(vmWareSource)
@@ -307,8 +357,7 @@ func configureVMImport(ctx *cli.Context) error {
 			return fmt.Errorf("failed to marshal vmware source: %v", err)
 		}
 
-	} else if ctx.String("source-cluster-type") == "openstack" {
-
+	case "openstack":
 		if ctx.String("dc") != "" {
 			return fmt.Errorf("dc is not supported for openstack source cluster type")
 		}
@@ -316,23 +365,16 @@ func configureVMImport(ctx *cli.Context) error {
 		if ctx.String("region") == "" {
 			return fmt.Errorf("region is required for openstack source cluster type")
 		}
-		resourceType = "openstacksources"
 		openStackSource := VMImportV1.OpenstackSource{
 			TypeMeta: v1.TypeMeta{
 				Kind:       "OpenstackSource",
 				APIVersion: harvesterMigrationAPIGroup,
 			},
-			ObjectMeta: v1.ObjectMeta{
-				Name:      ctx.Args().First(),
-				Namespace: "harvester-system",
-			},
+			ObjectMeta: objectMeta,
 			Spec: VMImportV1.OpenstackSourceSpec{
 				EndpointAddress: ctx.String("endpoint"),
 				Region:          ctx.String("region"),
-				Credentials: corev1.SecretReference{
-					Name:      credentialsName,
-					Namespace: credentialsNS,
-				},
+				Credentials:     *credentials,
 			},
 		}
 		createVMSourceBody, err = json.Marshal(openStackSource)
@@ -341,8 +383,33 @@ func configureVMImport(ctx *cli.Context) error {
 			return fmt.Errorf("failed to marshal openstack source: %v", err)
 		}
 
-	} else {
-		return fmt.Errorf("invalid source cluster type: %v, must be \"openstack\" or \"vmware\"", ctx.String("source-cluster-type"))
+	case "ova":
+		if ctx.String("dc") != "" {
+			return fmt.Errorf("dc is not supported for ova source cluster type")
+		}
+
+		if ctx.String("region") != "" {
+			return fmt.Errorf("region is not supported for ova source cluster type")
+		}
+
+		httpTimeout := ctx.Int("http-timeout")
+		ovaSource := VMImportV1.OvaSource{
+			TypeMeta: v1.TypeMeta{
+				Kind:       "OvaSource",
+				APIVersion: harvesterMigrationAPIGroup,
+			},
+			ObjectMeta: objectMeta,
+			Spec: VMImportV1.OvaSourceSpec{
+				Url:              ctx.String("endpoint"),
+				OvaSourceOptions: VMImportV1.OvaSourceOptions{HttpTimeoutSeconds: &httpTimeout},
+				Credentials:      credentials,
+			},
+		}
+		createVMSourceBody, err = json.Marshal(ovaSource)
+
+		if err != nil {
+			return fmt.Errorf("failed to marshal ova source: %v", err)
+		}
 	}
 
 	_, err = c.HarvesterhciV1beta1().RESTClient().Post().Resource(resourceType + ".migration").Namespace(ctx.String("source-cluster-namespace")).Body(createVMSourceBody).DoRaw(context.Background())
@@ -366,22 +433,9 @@ func deleteVMImportSource(ctx *cli.Context) error {
 		return err
 	}
 
-	var resourceType string
-	if ctx.String("source-cluster-type") == "openstack" {
-		if ctx.String("dc") != "" {
-			return fmt.Errorf("dc is not supported for openstack source cluster type")
-		}
-
-		resourceType = "openstacksources"
-
-	} else if ctx.String("source-cluster-type") == "vmware" {
-		if ctx.String("region") != "" {
-			return fmt.Errorf("region is not supported for vmware source cluster type")
-		}
-
-		resourceType = "vmwaresources"
-	} else {
-		return fmt.Errorf("invalid source cluster type: %v, must be \"openstack\" or \"vmware\"", ctx.String("source-cluster-type"))
+	resourceType, _, err := resolveSourceClusterType(ctx.String("source-cluster-type"))
+	if err != nil {
+		return err
 	}
 
 	err = c.HarvesterhciV1beta1().RESTClient().Delete().Resource(resourceType + ".migration").Namespace(ctx.String("namespace")).Name(ctx.Args().First()).Do(context.Background()).Error()
@@ -405,26 +459,13 @@ func createVMImport(ctx *cli.Context) error {
 		return err
 	}
 
-	var resourceKind string
-	if ctx.String("source-cluster-type") == "openstack" {
-		if ctx.String("dc") != "" {
-			return fmt.Errorf("dc is not supported for openstack source cluster type")
-		}
-
-		resourceKind = "OpenstackSource"
-
-	} else if ctx.String("source-cluster-type") == "vmware" {
-		if ctx.String("region") != "" {
-			return fmt.Errorf("region is not supported for vmware source cluster type")
-		}
-
-		resourceKind = "VmwareSource"
-	} else {
-		return fmt.Errorf("invalid source cluster type: %v, must be \"openstack\" or \"vmware\"", ctx.String("source-cluster-type"))
+	_, resourceKind, err := resolveSourceClusterType(ctx.String("source-cluster-type"))
+	if err != nil {
+		return err
 	}
 
 	var netMap []VMImportV1.NetworkMapping
-	for _, mapping := range ctx.StringSlice("mapping") {
+	for _, mapping := range ctx.StringSlice("network-mapping") {
 		mappingSplit := strings.Split(mapping, ":")
 		if len(mappingSplit) != 2 {
 			return fmt.Errorf("invalid mapping format: %v, must be <source-network>:<target-network>", mapping)
@@ -442,12 +483,13 @@ func createVMImport(ctx *cli.Context) error {
 			APIVersion: harvesterMigrationAPIGroup,
 		},
 		ObjectMeta: v1.ObjectMeta{
-			Name:      ctx.Args().First(),
-			Namespace: "harvester-system",
+			Name: ctx.Args().First(),
+			// Has to match the namespace the request is POSTed to, the API server rejects a mismatch.
+			Namespace: ctx.String("source-cluster-namespace"),
 		},
 		Spec: VMImportV1.VirtualMachineImportSpec{
 			SourceCluster: corev1.ObjectReference{
-				Name:       ctx.String("source-cluster-name"),
+				Name:       ctx.String("source-cluster"),
 				Kind:       resourceKind,
 				Namespace:  ctx.String("source-cluster-namespace"),
 				APIVersion: harvesterMigrationAPIGroup,

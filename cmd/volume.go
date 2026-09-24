@@ -131,12 +131,14 @@ func volumeList(ctx *cli.Context) error {
 		{"USED", "Used"},
 		{"STORAGE CLASS", "StorageClass"},
 	}, ctxv1)
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 
 	for _, pvc := range pvcList.Items {
 		capacity := ""
 		if q, ok := pvc.Spec.Resources.Requests["storage"]; ok {
-			capacity = q.String()
+			// Quantity.String() replays whatever format the PVC was written with, so a VM disk
+			// created through the Harvester UI prints as "34359738368" next to a "12Gi" from the CLI.
+			capacity = formatBytes(q.Value())
 		}
 
 		state := string(pvc.Status.Phase)
@@ -242,7 +244,7 @@ func volumeListStorageClass(ctx *cli.Context) error {
 		{"BINDING MODE", "VolumeBindingMode"},
 		{"ALLOW EXPANSION", "AllowExpansion"},
 	}, ctxv1)
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 
 	for _, sc := range scList.Items {
 		rp := "Delete"

@@ -36,19 +36,22 @@ func ShellCommand() *cli.Command {
 		ArgsUsage: "VM_NAME",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:    "namespace, n",
+				Name:    "namespace",
+				Aliases: []string{"n"},
 				Usage:   "Namespace for the VM",
 				EnvVars: []string{"HARVESTER_VM_NAMESPACE"},
 				Value:   "default",
 			},
 			&cli.StringFlag{
-				Name:    "ssh-user, user",
+				Name:    "ssh-user",
+				Aliases: []string{"user"},
 				Usage:   "SSH user to be used for connecting to VM",
 				EnvVars: []string{"HARVESTER_VM_SSH_USER"},
 				Value:   "ubuntu",
 			},
 			&cli.StringFlag{
-				Name:    "ssh-key, i",
+				Name:    "ssh-key",
+				Aliases: []string{"i"},
 				Usage:   "Path to SSH Private Key to be used for connecting to VM",
 				EnvVars: []string{"HARVESTER_VM_SSH_KEY"},
 				Value:   userHome + "/.ssh/id_rsa",

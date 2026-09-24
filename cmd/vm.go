@@ -16,9 +16,8 @@ import (
 	"github.com/urfave/cli/v2"
 	"gopkg.in/yaml.v3"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
-	k8sresource "k8s.io/apimachinery/pkg/api/resource"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	VMv1 "kubevirt.io/api/core/v1"
 )
@@ -222,8 +221,9 @@ func VMCommand() *cli.Command {
 				ArgsUsage: "[VM_NAME]",
 				Flags: []cli.Flag{
 					&cli.StringFlag{
-						Name:  "vm-name, name",
-						Usage: "Name of the VM to restart",
+						Name:    "vm-name",
+						Aliases: []string{"name"},
+						Usage:   "Name of the VM to restart",
 					},
 					&nsFlag,
 				},
@@ -281,7 +281,7 @@ func vmLs(ctx *cli.Context) error {
 	},
 		ctxv1)
 
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 
 	for _, vm := range vmList.Items {
 
@@ -478,7 +478,7 @@ func vmCreateFromTemplate(ctx *cli.Context, c *harvclient.Clientset) error {
 
 	pvc := pvcList[0]
 
-	vmImageIdWithNamespace := pvc.ObjectMeta.Annotations["harvesterhci.io/imageId"]
+	vmImageIdWithNamespace := pvc.Annotations["harvesterhci.io/imageId"]
 	vmImageId := strings.Split(vmImageIdWithNamespace, "/")[1]
 
 	err = ctx.Set("vm-image-id", vmImageId)
@@ -581,6 +581,11 @@ func vmCreateFromImage(ctx *cli.Context, c *harvclient.Clientset, vmTemplate *VM
 			return err
 		}
 		logrus.Debugf("Image found: %s/%s", vmImage.Namespace, vmImage.Name)
+		// findVMImage falls back to a cluster-wide search, so say so when the image that was
+		// actually picked is not the one the given namespace/name pointed at.
+		if vmImage.Namespace != vmImageNS || vmImage.Name != VMImageName {
+			logrus.Infof("image %q resolved to %s/%s", imageID, vmImage.Namespace, vmImage.Name)
+		}
 	} else {
 		vmImage, err = setDefaultVMImage(c, ctx)
 		if err != nil {
@@ -714,11 +719,13 @@ func vmCreateFromImage(ctx *cli.Context, c *harvclient.Clientset, vmTemplate *VM
 			continue
 		}
 
-		_, err = c.KubevirtV1().VirtualMachines(ctx.String("namespace")).Create(context.TODO(), ubuntuVM, k8smetav1.CreateOptions{})
+		createdVM, err := c.KubevirtV1().VirtualMachines(ctx.String("namespace")).Create(context.TODO(), ubuntuVM, k8smetav1.CreateOptions{})
 
 		if err != nil {
 			return err
 		}
+
+		logrus.Infof("VM %s/%s created successfully", createdVM.Namespace, createdVM.Name)
 	}
 
 	return nil
@@ -897,7 +904,12 @@ func vmStart(ctx *cli.Context) error {
 		return err
 	}
 
-	for _, vmName := range ctx.Args().Slice() {
+	vmNames, err := vmNamesFromContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, vmName := range vmNames {
 
 		if strings.Contains(vmName, "*") || strings.Contains(vmName, "?") {
 			matchingVMs := buildVMListMatchingWildcard(c, ctx, vmName)
@@ -908,13 +920,25 @@ func vmStart(ctx *cli.Context) error {
 					return err
 				}
 			}
-		} else {
-			return startVMbyName(c, ctx, vmName)
-
+		} else if err := startVMbyName(c, ctx, vmName); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+// vmNamesFromContext returns the VM names the command should act on: the positional arguments,
+// or the --vm-name flag when no argument was given. Naming no VM at all is an error rather than
+// a silent no-op.
+func vmNamesFromContext(ctx *cli.Context) ([]string, error) {
+	if ctx.Args().Present() {
+		return ctx.Args().Slice(), nil
+	}
+	if vmName := ctx.String("vm-name"); vmName != "" {
+		return []string{vmName}, nil
+	}
+	return nil, fmt.Errorf("no VM name given, pass it as an argument (see 'harvester vm list')")
 }
 
 // buildVMListMatchingWildcard creates an array of VM objects which names match the given wildcard pattern
@@ -985,7 +1009,13 @@ func vmStop(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, vmName := range ctx.Args().Slice() {
+
+	vmNames, err := vmNamesFromContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, vmName := range vmNames {
 
 		if strings.Contains(vmName, "*") || strings.Contains(vmName, "?") {
 			matchingVMs := buildVMListMatchingWildcard(c, ctx, vmName)
@@ -996,11 +1026,11 @@ func vmStop(ctx *cli.Context) error {
 					return err
 				}
 			}
-		} else {
-			return stopVMbyName(c, ctx, vmName)
+		} else if err := stopVMbyName(c, ctx, vmName); err != nil {
+			return err
 		}
 	}
-	return err
+	return nil
 }
 
 // stopVMbyName will stop a VM by first finding it by its name and then call stopBMbyRef function
@@ -1071,7 +1101,7 @@ func setDefaultVMImage(c *harvclient.Clientset, ctx *cli.Context) (result *v1bet
 		vmImage = &vmImages.Items[0]
 	}
 
-	imageID := vmImage.ObjectMeta.Name
+	imageID := vmImage.Name
 	err1 = ctx.Set("vm-image-id", imageID)
 
 	if err1 != nil {
@@ -1143,9 +1173,10 @@ func getCloudInitData(ctx *cli.Context, scope string) (string, error) {
 			return ciData.Data["cloudInit"], nil
 		}
 
-		if scope == "user" {
+		switch scope {
+		case "user":
 			return defaultCloudInitUserData, nil
-		} else if scope == "network" {
+		case "network":
 			return defaultCloudInitNetworkData, nil
 		}
 
@@ -1195,7 +1226,7 @@ func enrichVMTemplate(c *harvclient.Clientset, ctx *cli.Context, vmTemplate *VMv
 
 	if ctx.IsSet("cpus") {
 		vmTemplate.Spec.Domain.CPU.Cores = uint32(ctx.Int("cpus"))
-		cpuQuantity := k8sresource.NewQuantity(int64(ctx.Int("cpus")), k8sresource.DecimalSI)
+		cpuQuantity := resource.NewQuantity(int64(ctx.Int("cpus")), resource.DecimalSI)
 		vmTemplate.Spec.Domain.Resources.Limits["cpu"] = *cpuQuantity
 		if vmTemplate.Spec.Domain.Resources.Requests == nil {
 			vmTemplate.Spec.Domain.Resources.Requests = v1.ResourceList{}
@@ -1204,7 +1235,7 @@ func enrichVMTemplate(c *harvclient.Clientset, ctx *cli.Context, vmTemplate *VMv
 	}
 
 	if ctx.IsSet("memory") {
-		vmTemplate.Spec.Domain.Resources.Limits["memory"] = k8sresource.MustParse(ctx.String("memory"))
+		vmTemplate.Spec.Domain.Resources.Limits["memory"] = resource.MustParse(ctx.String("memory"))
 		if vmTemplate.Spec.Domain.Resources.Requests == nil {
 			vmTemplate.Spec.Domain.Resources.Requests = v1.ResourceList{}
 		}

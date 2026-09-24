@@ -1,1 +1,8 @@
 .vscode
+
+# Local build output
+/harvester
+/harvester-darwin-*
+/harvester-linux-*
+/harvester-windows-*
+/dist/
