@@ -79,6 +79,21 @@ func VolumeCommand() *cli.Command {
 				},
 			},
 			&cli.Command{
+				Name:        "delete",
+				Aliases:     []string{"del", "rm"},
+				Usage:       "Delete one or more volumes (PersistentVolumeClaims)",
+				Description: "\nDeletes PersistentVolumeClaims. A volume still referenced by a VM is refused unless --force is given",
+				ArgsUsage:   "VOLUME_NAME [VOLUME_NAME...]",
+				Action:      volumeDelete,
+				Flags: []cli.Flag{
+					&nsFlag,
+					&cli.BoolFlag{
+						Name:  "force",
+						Usage: "Delete the volume even if a VM still references it",
+					},
+				},
+			},
+			&cli.Command{
 				Name:        "list-storageclass",
 				Aliases:     []string{"ls-sc", "storageclass"},
 				Usage:       "List available StorageClasses",
@@ -223,6 +238,56 @@ func volumeCreate(ctx *cli.Context) error {
 	}
 
 	fmt.Printf("Volume created: %s/%s\n", created.Namespace, created.Name)
+	return nil
+}
+
+func volumeDelete(ctx *cli.Context) error {
+	if ctx.NArg() == 0 {
+		return fmt.Errorf("expected at least one argument: VOLUME_NAME")
+	}
+
+	kube, err := GetKubeClient(ctx)
+	if err != nil {
+		return err
+	}
+
+	namespace := ctx.String("namespace")
+
+	// A PVC that a VM still lists as a volume deletes into Terminating and sits there until the VM
+	// goes away, which looks like a hang. Name the VM instead.
+	inUseBy := map[string]string{}
+	if !ctx.Bool("force") {
+		harv, err := GetHarvesterClient(ctx)
+		if err != nil {
+			return err
+		}
+		vmList, err := harv.KubevirtV1().VirtualMachines(namespace).List(context.TODO(), k8smetav1.ListOptions{})
+		if err != nil {
+			return err
+		}
+		for _, vm := range vmList.Items {
+			if vm.Spec.Template == nil {
+				continue
+			}
+			for _, vol := range vm.Spec.Template.Spec.Volumes {
+				if vol.PersistentVolumeClaim != nil {
+					inUseBy[vol.PersistentVolumeClaim.ClaimName] = vm.Name
+				}
+			}
+		}
+	}
+
+	for _, volName := range ctx.Args().Slice() {
+		if vmName, used := inUseBy[volName]; used {
+			return fmt.Errorf("volume %s/%s is still used by VM %s, delete the VM first or pass --force", namespace, volName, vmName)
+		}
+
+		if err := kube.CoreV1().PersistentVolumeClaims(namespace).Delete(context.TODO(), volName, k8smetav1.DeleteOptions{}); err != nil {
+			return fmt.Errorf("volume %s/%s could not be deleted: %w", namespace, volName, err)
+		}
+		fmt.Printf("Volume deleted: %s/%s\n", namespace, volName)
+	}
+
 	return nil
 }
 

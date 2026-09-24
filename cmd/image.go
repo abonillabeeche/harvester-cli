@@ -43,6 +43,10 @@ type ImageData struct {
 // longhornProvisioner is the CSI driver name of both Longhorn data engines.
 const longhornProvisioner = "driver.longhorn.io"
 
+// storageClassNameAnnotation is where Harvester's image mutators look for the StorageClass that a
+// VirtualMachineImage should be built from.
+const storageClassNameAnnotation = "harvesterhci.io/storageClassName"
+
 // backendFlag selects the storage backend Harvester uses to hold the image. Harvester v1.9.0
 // serves images either as a Longhorn v1 backing image or through CDI; only CDI can put an image
 // on a third-party StorageClass (Ceph RBD, LINSTOR, Longhorn v2, ...).
@@ -144,6 +148,17 @@ func ImageCommand() *cli.Command {
 						Name:  "dry-run",
 						Usage: "Print the YAML manifest that would be submitted without creating the resource",
 					},
+				},
+			},
+			&cli.Command{
+				Name:        "delete",
+				Aliases:     []string{"del", "rm"},
+				Usage:       "Delete one or more VM images",
+				Description: "\nDeletes VM images by display name or by resource name, within the given namespace",
+				ArgsUsage:   "VM_IMAGE_NAME [VM_IMAGE_NAME...]",
+				Action:      imageDelete,
+				Flags: []cli.Flag{
+					&nsFlag,
 				},
 			},
 			&cli.Command{
@@ -297,6 +312,52 @@ func imageList(ctx *cli.Context) (err error) {
 	return writer.Err()
 }
 
+// imageDelete removes one or more VM images. Images are addressed the same way `image list` prints
+// them, which is by display name, so the resource name has to be looked up first.
+func imageDelete(ctx *cli.Context) error {
+	if ctx.NArg() == 0 {
+		return fmt.Errorf("expected at least one argument: VM_IMAGE_NAME")
+	}
+
+	c, err := GetHarvesterClient(ctx)
+	if err != nil {
+		return err
+	}
+
+	namespace := ctx.String("namespace")
+	images, err := c.HarvesterhciV1beta1().VirtualMachineImages(namespace).List(context.TODO(), k8smetav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+
+	for _, nameOrDisplayName := range ctx.Args().Slice() {
+		// Deliberately scoped to one namespace, unlike findVMImage: a delete should never reach
+		// across the cluster to find something that looks close enough.
+		var matches []string
+		for _, image := range images.Items {
+			if image.Name == nameOrDisplayName || image.Spec.DisplayName == nameOrDisplayName {
+				matches = append(matches, image.Name)
+			}
+		}
+
+		switch len(matches) {
+		case 0:
+			return fmt.Errorf("no VM image named %q in namespace %s", nameOrDisplayName, namespace)
+		case 1:
+		default:
+			return fmt.Errorf("%q matches %d images in namespace %s (%s), delete it by resource name instead",
+				nameOrDisplayName, len(matches), namespace, strings.Join(matches, ", "))
+		}
+
+		if err := c.HarvesterhciV1beta1().VirtualMachineImages(namespace).Delete(context.TODO(), matches[0], k8smetav1.DeleteOptions{}); err != nil {
+			return fmt.Errorf("VM image %q (%s) could not be deleted: %w", nameOrDisplayName, matches[0], err)
+		}
+		logrus.Infof("VM image %s (%s/%s) deleted successfully", nameOrDisplayName, namespace, matches[0])
+	}
+
+	return nil
+}
+
 // imageCreate create a VM Image in Harvester based on a URL and a display name as well as an optional description
 func imageCreate(ctx *cli.Context) (err error) {
 	if ctx.NArg() != 1 {
@@ -430,6 +491,15 @@ func createImageObjectInAPI(ctx *cli.Context, vmImageDisplayName string, sourceT
 		return
 	}
 
+	// The backing-image mutator reads the StorageClass from this annotation, not from
+	// spec.targetStorageClassName, and it runs before the mutator that would copy the spec over.
+	// Without it --storage-class is ignored and the create is rejected outright on any cluster
+	// whose default StorageClass is only marked with the deprecated beta annotation.
+	var imageAnnotations map[string]string
+	if sc := ctx.String("storage-class"); sc != "" {
+		imageAnnotations = map[string]string{storageClassNameAnnotation: sc}
+	}
+
 	vmImage := &v1beta1.VirtualMachineImage{
 		TypeMeta: k8smetav1.TypeMeta{
 			APIVersion: "harvesterhci.io/v1beta1",
@@ -438,6 +508,7 @@ func createImageObjectInAPI(ctx *cli.Context, vmImageDisplayName string, sourceT
 		ObjectMeta: k8smetav1.ObjectMeta{
 			GenerateName: "image-",
 			Namespace:    ctx.String("namespace"),
+			Annotations:  imageAnnotations,
 		},
 		Spec: v1beta1.VirtualMachineImageSpec{
 			Backend:                backend,

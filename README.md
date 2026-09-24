@@ -35,10 +35,10 @@ Built and tested against **Harvester v1.9.0** (KubeVirt 1.8.x). Earlier 1.x clus
 | Area | Capabilities |
 |---|---|
 | **Virtual Machines** | List, create, delete, start, stop, restart, live-migrate |
-| **VM Images** | List (with StorageClass and backend), upload from URL or file, Longhorn backing-image or CDI backend |
+| **VM Images** | List (with StorageClass and backend), upload from URL or file, delete, Longhorn backing-image or CDI backend |
 | **Image Catalog** | Curated list of cloud-init-enabled Linux images (Fedora, CentOS Stream, Debian, AlmaLinux, Rocky, Ubuntu, openSUSE); interactive picker, scriptable `create`, works offline via embedded JSON + `catalog init` cache |
 | **Networks** | List NADs with VLAN info, including trunk ranges |
-| **Volumes** | List PVCs with live Longhorn usage and StorageClass; create new PVCs |
+| **Volumes** | List PVCs with live Longhorn usage and StorageClass; create and delete PVCs |
 | **Hosts** | List nodes with real-time CPU % and memory usage from the metrics API |
 | **Templates** | List and inspect VM templates |
 | **SSH Keypairs** | List registered public keys |
@@ -276,6 +276,33 @@ harvester image create --dry-run \
   ubuntu-noble
 ```
 
+> `--storage-class` is also written to the `harvesterhci.io/storageClassName` annotation, which is
+> where Harvester's backing-image mutator actually reads it from. Without the annotation the flag is
+> ignored on the `backingimage` path, and on a cluster whose default StorageClass is marked only
+> with the deprecated `storageclass.beta.kubernetes.io/is-default-class` annotation the create is
+> rejected outright with `no default storageClass found for backingImage`.
+
+---
+
+```bash
+harvester image delete [-n NAMESPACE] IMAGE_NAME [IMAGE_NAME...]
+```
+
+Deletes one or more images. An image can be named either by the display name `image list` shows or
+by its resource name (the part after the `/` in the ID column). Unlike `vm create --vm-image-id`,
+the lookup never leaves the namespace — a delete should not reach across the cluster for something
+that merely looks close enough.
+
+```bash
+harvester image delete ubuntu-noble
+# VM image ubuntu-noble (default/image-zzkzm) deleted successfully
+
+harvester image delete -n staging leap-16 image-ccxcx
+```
+
+Harvester refuses the delete while a VM or volume still depends on the image, and the webhook's
+error is passed through unchanged.
+
 ---
 
 ### Image Catalog
@@ -494,6 +521,24 @@ harvester volume create --sc tworeplicas --size 20Gi my-data-vol
 ---
 
 ```bash
+harvester volume delete [-n NAMESPACE] [--force] VOLUME_NAME [VOLUME_NAME...]
+```
+
+Deletes PersistentVolumeClaims. A volume that a VM still lists as a disk is refused by name, because
+deleting it would leave the PVC in `Terminating` until the VM itself is gone — which looks like a
+hang. Pass `--force` to skip the check.
+
+```bash
+harvester volume delete my-data-vol
+# Volume deleted: default/my-data-vol
+
+harvester volume delete my-vm-disk
+# FATA volume default/my-vm-disk is still used by VM my-vm, delete the VM first or pass --force
+```
+
+---
+
+```bash
 harvester volume list-storageclass
 ```
 
@@ -654,15 +699,21 @@ harvester import create \
 ---
 
 ```bash
-harvester import list
+harvester import list [-n NAMESPACE]
 harvester import delete [-n NAMESPACE] VM_IMPORT_NAME
 harvester import source-delete [-n NAMESPACE] [--type TYPE] SOURCE_NAME
 ```
 
+An import lives in the same namespace as its source, which is not necessarily `harvester-system`, so
+`import list` covers every namespace unless `-n` narrows it.
+
 ```
-NAME             VM NAME        STATUS    SOURCE_CLUSTER   CLUSTER_TYPE
-import-my-guest  my-guest.ova   Running   my-ovas          OvaSource
+NAME             NAMESPACE          VM NAME        STATUS    SOURCE_CLUSTER   CLUSTER_TYPE
+import-my-guest  harvester-system   my-guest.ova   Running   my-ovas          OvaSource
 ```
+
+`--source-cluster-namespace` and `-n`/`--namespace` are accepted interchangeably across every
+`import` subcommand.
 
 ---
 
@@ -822,6 +873,28 @@ harvester vm create my-vm --cpus 2 --memory 4Gi
 
 The CLI refuses to run rather than dropping the flags, which used to mean a stray
 `harvester vm create my-vm --dry-run` really created the VM.
+
+### Misspelled subcommands
+
+Every top-level command lists when it is called with no subcommand, and urfave/cli falls through to
+that action when the subcommand does not exist — so `harvester image delet foo` used to print the
+image list and exit 0. It now names the mistake:
+
+```bash
+harvester image delet my-image
+# FATA unknown subcommand "delet" for "image", expected one of: list, create, delete, catalog, help
+```
+
+### Sizes need a unit
+
+`--memory 4` is 4 *bytes*, not 4 GiB, and Harvester rejects it much later with a confusing
+`guest memory is under the minimum requirement (10 Mi)`. `--memory` and `--disk-size` are now checked
+before anything is sent:
+
+```bash
+harvester vm create -m 4 my-vm
+# FATA invalid --memory "4", a bare number is read as bytes -- use a unit, such as 4Gi
+```
 
 ### Cross-namespace references
 

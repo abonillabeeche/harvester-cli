@@ -387,6 +387,13 @@ func vmDeleteWithPVC(vmExisting *VMv1.VirtualMachine, c *harvclient.Clientset, c
 
 // vmCreate implements the CLI *vm create* command, there are two options, either to create a VM from a Harvester VM template or from a VM image
 func vmCreate(ctx *cli.Context) error {
+	// Both the memory and the disk size end up in resource.MustParse, which panics on anything it
+	// cannot read, and a unit-less number parses as bytes and only gets rejected later by the
+	// Harvester webhook ("guest memory is under the minimum requirement").
+	if err := validateQuantityFlags(ctx, "memory", "disk-size"); err != nil {
+		return err
+	}
+
 	c, err := GetHarvesterClient(ctx)
 
 	if err != nil {
@@ -398,6 +405,28 @@ func vmCreate(ctx *cli.Context) error {
 	} else {
 		return vmCreateFromImage(ctx, c, nil)
 	}
+}
+
+// minimumQuantity is the smallest value accepted for a size flag. Harvester's own mutator refuses
+// guest memory below 10Mi, and anything that small for a disk is a typo anyway.
+var minimumQuantity = resource.MustParse("10Mi")
+
+// validateQuantityFlags checks that the named flags hold a Kubernetes quantity with a unit.
+func validateQuantityFlags(ctx *cli.Context, names ...string) error {
+	for _, name := range names {
+		value := ctx.String(name)
+		if value == "" {
+			continue
+		}
+		quantity, err := resource.ParseQuantity(value)
+		if err != nil {
+			return fmt.Errorf("invalid --%s %q, expected a size such as 4Gi or 512Mi: %w", name, value, err)
+		}
+		if quantity.Cmp(minimumQuantity) < 0 {
+			return fmt.Errorf("invalid --%s %q, a bare number is read as bytes -- use a unit, such as %sGi", name, value, value)
+		}
+	}
+	return nil
 }
 
 // vmCreateFromTemplate creates a VM from a VM template provided in the CLI command

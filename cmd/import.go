@@ -44,6 +44,7 @@ func resolveSourceClusterType(sourceType string) (resource string, kind string, 
 
 type VMImportData struct {
 	Name          string
+	Namespace     string
 	VMName        string
 	SourceCluster string
 	ClusterType   string
@@ -79,6 +80,13 @@ func importListCommand() *cli.Command {
 		Name:   "list",
 		Usage:  "List VM imports",
 		Action: listVMImports,
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:    "namespace",
+				Aliases: []string{"n"},
+				Usage:   "Namespace to list VM imports from, defaults to all namespaces",
+			},
+		},
 	}
 }
 
@@ -114,6 +122,7 @@ func importCreateCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:     "source-cluster-namespace",
+				Aliases:  []string{"namespace", "n"},
 				Usage:    "Namespace of the InfrastructureSource to be used for source cluster configuration",
 				Required: true,
 				EnvVars:  []string{"HARVESTER_IMPORT_SOURCE_CLUSTER_NAMESPACE"},
@@ -138,6 +147,7 @@ func importSourceAddCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:     "source-cluster-namespace",
+				Aliases:  []string{"namespace", "n"},
 				Usage:    "Namespace of the InfrastructureSource to be used for source cluster configuration",
 				Required: true,
 				EnvVars:  []string{"HARVESTER_IMPORT_SOURCE_CLUSTER_NAMESPACE"},
@@ -186,9 +196,11 @@ func importSourceDeleteCommand() *cli.Command {
 		Action:    deleteVMImportSource,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:    "namespace",
-				Aliases: []string{"n"},
+				Name: "namespace",
+				// source-add spells this --source-cluster-namespace, accept both here.
+				Aliases: []string{"n", "source-cluster-namespace"},
 				Usage:   "Namespace of the source cluster to be deleted",
+				EnvVars: []string{"HARVESTER_IMPORT_SOURCE_CLUSTER_NAMESPACE"},
 			},
 			&cli.StringFlag{
 				Name:    "source-cluster-type",
@@ -251,7 +263,14 @@ func listVMImports(ctx *cli.Context) error {
 		return err
 	}
 
-	vmImportResultRaw, err := c.HarvesterhciV1beta1().RESTClient().Get().Resource("virtualmachineimports.migration").Namespace("harvester-system").DoRaw(context.Background())
+	// An import lives in the same namespace as its source, which is not necessarily
+	// harvester-system, so list across every namespace unless one was asked for.
+	request := c.HarvesterhciV1beta1().RESTClient().Get().Resource("virtualmachineimports.migration")
+	if namespace := ctx.String("namespace"); namespace != "" {
+		request = request.Namespace(namespace)
+	}
+
+	vmImportResultRaw, err := request.DoRaw(context.Background())
 
 	if err != nil {
 		return fmt.Errorf("failed to list VM imports: %v", err)
@@ -266,6 +285,7 @@ func listVMImports(ctx *cli.Context) error {
 
 	writer := rcmd.NewTableWriter([][]string{
 		{"NAME", "Name"},
+		{"NAMESPACE", "Namespace"},
 		{"VM NAME", "VMName"},
 		{"STATUS", "Status"},
 		{"SOURCE_CLUSTER", "SourceCluster"},
@@ -277,6 +297,7 @@ func listVMImports(ctx *cli.Context) error {
 	for _, vmImport := range vmImportList.Items {
 		writer.Write(&VMImportData{
 			Name:          vmImport.Name,
+			Namespace:     vmImport.Namespace,
 			VMName:        vmImport.Spec.VirtualMachineName,
 			Status:        string(vmImport.Status.Status),
 			SourceCluster: vmImport.Spec.SourceCluster.Name,

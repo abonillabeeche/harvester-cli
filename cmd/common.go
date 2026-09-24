@@ -271,17 +271,45 @@ func RejectFlagsAfterArgs(ctx *cli.Context) error {
 	return nil
 }
 
-// GuardFlagOrder attaches RejectFlagsAfterArgs to every leaf command of the tree, chaining it in
-// front of any Before the command already has.
-func GuardFlagOrder(commands []*cli.Command) {
-	for _, command := range commands {
-		if len(command.Subcommands) > 0 {
-			GuardFlagOrder(command.Subcommands)
-			continue
+// RejectUnknownSubcommands fails a command that owns subcommands when the first argument is not
+// one of them. urfave/cli runs the parent's own Action in that case, and since every parent here
+// lists, `harvester image delete foo` used to print the image list and exit 0 instead of saying
+// that there is no such subcommand.
+func RejectUnknownSubcommands(command *cli.Command) func(*cli.Context) error {
+	return func(ctx *cli.Context) error {
+		if !ctx.Args().Present() {
+			return nil
 		}
+		// urfave/cli appends the help subcommand itself, after this guard is installed.
+		first := ctx.Args().First()
+		if first == "help" || first == "h" {
+			return nil
+		}
+		names := make([]string, 0, len(command.Subcommands))
+		for _, subcommand := range command.Subcommands {
+			if subcommand.HasName(first) {
+				return nil
+			}
+			names = append(names, subcommand.Name)
+		}
+		return fmt.Errorf("unknown subcommand %q for %q, expected one of: %s", first, command.Name, strings.Join(names, ", "))
+	}
+}
+
+// GuardCommandUsage walks the command tree and installs the two usage guards: leaves reject flags
+// that came after a positional argument, parents reject subcommands that do not exist. Both chain
+// in front of any Before the command already has.
+func GuardCommandUsage(commands []*cli.Command) {
+	for _, command := range commands {
+		guard := RejectFlagsAfterArgs
+		if len(command.Subcommands) > 0 {
+			GuardCommandUsage(command.Subcommands)
+			guard = RejectUnknownSubcommands(command)
+		}
+
 		existingBefore := command.Before
 		command.Before = func(ctx *cli.Context) error {
-			if err := RejectFlagsAfterArgs(ctx); err != nil {
+			if err := guard(ctx); err != nil {
 				return err
 			}
 			if existingBefore != nil {

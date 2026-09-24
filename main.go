@@ -94,7 +94,7 @@ func mainErr() error {
 		cmd.CompleteCommand(),
 	}
 	app.EnableBashCompletion = true
-	cmd.GuardFlagOrder(app.Commands)
+	cmd.GuardCommandUsage(app.Commands)
 
 	cmd.SetEmbeddedCatalog(embeddedCatalog)
 
