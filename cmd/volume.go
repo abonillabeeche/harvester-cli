@@ -22,10 +22,30 @@ type VolumeData struct {
 
 type StorageClassData struct {
 	Name              string
+	Default           string
 	Provisioner       string
 	ReclaimPolicy     string
 	VolumeBindingMode string
 	AllowExpansion    string
+}
+
+const (
+	defaultStorageClassAnnotation     = "storageclass.kubernetes.io/is-default-class"
+	betaDefaultStorageClassAnnotation = "storageclass.beta.kubernetes.io/is-default-class"
+)
+
+// defaultMarker says whether a StorageClass is the cluster default. Harvester only honours the
+// modern annotation, so a class carrying nothing but the deprecated beta one is called out: it looks
+// default to kubectl, but Harvester behaves as if the cluster has no default at all and rejects
+// backing-image creates with "no default storageClass found for backingImage".
+func defaultMarker(annotations map[string]string) string {
+	if annotations[defaultStorageClassAnnotation] == "true" {
+		return "*"
+	}
+	if annotations[betaDefaultStorageClassAnnotation] == "true" {
+		return "(beta only, Harvester ignores it)"
+	}
+	return ""
 }
 
 func VolumeCommand() *cli.Command {
@@ -75,6 +95,21 @@ func VolumeCommand() *cli.Command {
 					&cli.BoolFlag{
 						Name:  "dry-run",
 						Usage: "Print the YAML manifest that would be submitted without creating the resource",
+					},
+				},
+			},
+			&cli.Command{
+				Name:        "delete",
+				Aliases:     []string{"del", "rm"},
+				Usage:       "Delete one or more volumes (PersistentVolumeClaims)",
+				Description: "\nDeletes PersistentVolumeClaims. A volume still referenced by a VM is refused unless --force is given",
+				ArgsUsage:   "VOLUME_NAME [VOLUME_NAME...]",
+				Action:      volumeDelete,
+				Flags: []cli.Flag{
+					&nsFlag,
+					&cli.BoolFlag{
+						Name:  "force",
+						Usage: "Delete the volume even if a VM still references it",
 					},
 				},
 			},
@@ -131,12 +166,14 @@ func volumeList(ctx *cli.Context) error {
 		{"USED", "Used"},
 		{"STORAGE CLASS", "StorageClass"},
 	}, ctxv1)
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 
 	for _, pvc := range pvcList.Items {
 		capacity := ""
 		if q, ok := pvc.Spec.Resources.Requests["storage"]; ok {
-			capacity = q.String()
+			// Quantity.String() replays whatever format the PVC was written with, so a VM disk
+			// created through the Harvester UI prints as "34359738368" next to a "12Gi" from the CLI.
+			capacity = formatBytes(q.Value())
 		}
 
 		state := string(pvc.Status.Phase)
@@ -224,6 +261,56 @@ func volumeCreate(ctx *cli.Context) error {
 	return nil
 }
 
+func volumeDelete(ctx *cli.Context) error {
+	if ctx.NArg() == 0 {
+		return fmt.Errorf("expected at least one argument: VOLUME_NAME")
+	}
+
+	kube, err := GetKubeClient(ctx)
+	if err != nil {
+		return err
+	}
+
+	namespace := ctx.String("namespace")
+
+	// A PVC that a VM still lists as a volume deletes into Terminating and sits there until the VM
+	// goes away, which looks like a hang. Name the VM instead.
+	inUseBy := map[string]string{}
+	if !ctx.Bool("force") {
+		harv, err := GetHarvesterClient(ctx)
+		if err != nil {
+			return err
+		}
+		vmList, err := harv.KubevirtV1().VirtualMachines(namespace).List(context.TODO(), k8smetav1.ListOptions{})
+		if err != nil {
+			return err
+		}
+		for _, vm := range vmList.Items {
+			if vm.Spec.Template == nil {
+				continue
+			}
+			for _, vol := range vm.Spec.Template.Spec.Volumes {
+				if vol.PersistentVolumeClaim != nil {
+					inUseBy[vol.PersistentVolumeClaim.ClaimName] = vm.Name
+				}
+			}
+		}
+	}
+
+	for _, volName := range ctx.Args().Slice() {
+		if vmName, used := inUseBy[volName]; used {
+			return fmt.Errorf("volume %s/%s is still used by VM %s, delete the VM first or pass --force", namespace, volName, vmName)
+		}
+
+		if err := kube.CoreV1().PersistentVolumeClaims(namespace).Delete(context.TODO(), volName, k8smetav1.DeleteOptions{}); err != nil {
+			return fmt.Errorf("volume %s/%s could not be deleted: %w", namespace, volName, err)
+		}
+		fmt.Printf("Volume deleted: %s/%s\n", namespace, volName)
+	}
+
+	return nil
+}
+
 func volumeListStorageClass(ctx *cli.Context) error {
 	kube, err := GetKubeClient(ctx)
 	if err != nil {
@@ -237,12 +324,13 @@ func volumeListStorageClass(ctx *cli.Context) error {
 
 	writer := rcmd.NewTableWriter([][]string{
 		{"NAME", "Name"},
+		{"DEFAULT", "Default"},
 		{"PROVISIONER", "Provisioner"},
 		{"RECLAIM POLICY", "ReclaimPolicy"},
 		{"BINDING MODE", "VolumeBindingMode"},
 		{"ALLOW EXPANSION", "AllowExpansion"},
 	}, ctxv1)
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 
 	for _, sc := range scList.Items {
 		rp := "Delete"
@@ -259,6 +347,7 @@ func volumeListStorageClass(ctx *cli.Context) error {
 		}
 		writer.Write(&StorageClassData{
 			Name:              sc.Name,
+			Default:           defaultMarker(sc.Annotations),
 			Provisioner:       sc.Provisioner,
 			ReclaimPolicy:     rp,
 			VolumeBindingMode: bm,

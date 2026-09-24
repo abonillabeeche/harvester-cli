@@ -36,7 +36,24 @@ type ImageData struct {
 	Id           string
 	SourceType   string
 	StorageClass string
+	Backend      string
 	Url          string
+}
+
+// longhornProvisioner is the CSI driver name of both Longhorn data engines.
+const longhornProvisioner = "driver.longhorn.io"
+
+// storageClassNameAnnotation is where Harvester's image mutators look for the StorageClass that a
+// VirtualMachineImage should be built from.
+const storageClassNameAnnotation = "harvesterhci.io/storageClassName"
+
+// backendFlag selects the storage backend Harvester uses to hold the image. Harvester v1.9.0
+// serves images either as a Longhorn v1 backing image or through CDI; only CDI can put an image
+// on a third-party StorageClass (Ceph RBD, LINSTOR, Longhorn v2, ...).
+var backendFlag = cli.StringFlag{
+	Name:    "backend",
+	Usage:   "Image storage backend: 'backingimage' (Longhorn v1) or 'cdi' (any CSI StorageClass). Inferred from the StorageClass when omitted",
+	EnvVars: []string{"HARVESTER_VM_IMAGE_BACKEND"},
 }
 
 type CatalogEntry struct {
@@ -126,10 +143,22 @@ func ImageCommand() *cli.Command {
 						Usage:   "StorageClass to use for the image (e.g. tworeplicas, harvester-longhorn)",
 						EnvVars: []string{"HARVESTER_VM_IMAGE_SC"},
 					},
+					&backendFlag,
 					&cli.BoolFlag{
 						Name:  "dry-run",
 						Usage: "Print the YAML manifest that would be submitted without creating the resource",
 					},
+				},
+			},
+			&cli.Command{
+				Name:        "delete",
+				Aliases:     []string{"del", "rm"},
+				Usage:       "Delete one or more VM images",
+				Description: "\nDeletes VM images by display name or by resource name, within the given namespace",
+				ArgsUsage:   "VM_IMAGE_NAME [VM_IMAGE_NAME...]",
+				Action:      imageDelete,
+				Flags: []cli.Flag{
+					&nsFlag,
 				},
 			},
 			&cli.Command{
@@ -213,6 +242,7 @@ func ImageCommand() *cli.Command {
 								Usage:   "Description of the VM Image",
 								EnvVars: []string{"HARVESTER_VM_IMAGE_DESCRIPTION"},
 							},
+							&backendFlag,
 							&cli.BoolFlag{
 								Name:  "dry-run",
 								Usage: "Print the YAML manifest that would be submitted without creating the resource",
@@ -258,12 +288,13 @@ func imageList(ctx *cli.Context) (err error) {
 		{"NAME", "Name"},
 		{"ID", "Id"},
 		{"SOURCE TYPE", "SourceType"},
+		{"BACKEND", "Backend"},
 		{"STORAGE CLASS", "StorageClass"},
 		{"URL", "Url"},
 	},
 		ctxv1)
 
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 
 	for _, imgItem := range imgList.Items {
 
@@ -271,6 +302,7 @@ func imageList(ctx *cli.Context) (err error) {
 			Name:         imgItem.Spec.DisplayName,
 			Id:           imgItem.Namespace + "/" + imgItem.Name,
 			SourceType:   string(imgItem.Spec.SourceType),
+			Backend:      string(imgItem.Spec.Backend),
 			StorageClass: imgItem.Status.StorageClassName,
 			Url:          imgItem.Spec.URL,
 		})
@@ -278,6 +310,52 @@ func imageList(ctx *cli.Context) (err error) {
 	}
 
 	return writer.Err()
+}
+
+// imageDelete removes one or more VM images. Images are addressed the same way `image list` prints
+// them, which is by display name, so the resource name has to be looked up first.
+func imageDelete(ctx *cli.Context) error {
+	if ctx.NArg() == 0 {
+		return fmt.Errorf("expected at least one argument: VM_IMAGE_NAME")
+	}
+
+	c, err := GetHarvesterClient(ctx)
+	if err != nil {
+		return err
+	}
+
+	namespace := ctx.String("namespace")
+	images, err := c.HarvesterhciV1beta1().VirtualMachineImages(namespace).List(context.TODO(), k8smetav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+
+	for _, nameOrDisplayName := range ctx.Args().Slice() {
+		// Deliberately scoped to one namespace, unlike findVMImage: a delete should never reach
+		// across the cluster to find something that looks close enough.
+		var matches []string
+		for _, image := range images.Items {
+			if image.Name == nameOrDisplayName || image.Spec.DisplayName == nameOrDisplayName {
+				matches = append(matches, image.Name)
+			}
+		}
+
+		switch len(matches) {
+		case 0:
+			return fmt.Errorf("no VM image named %q in namespace %s", nameOrDisplayName, namespace)
+		case 1:
+		default:
+			return fmt.Errorf("%q matches %d images in namespace %s (%s), delete it by resource name instead",
+				nameOrDisplayName, len(matches), namespace, strings.Join(matches, ", "))
+		}
+
+		if err := c.HarvesterhciV1beta1().VirtualMachineImages(namespace).Delete(context.TODO(), matches[0], k8smetav1.DeleteOptions{}); err != nil {
+			return fmt.Errorf("VM image %q (%s) could not be deleted: %w", nameOrDisplayName, matches[0], err)
+		}
+		logrus.Infof("VM image %s (%s/%s) deleted successfully", nameOrDisplayName, namespace, matches[0])
+	}
+
+	return nil
 }
 
 // imageCreate create a VM Image in Harvester based on a URL and a display name as well as an optional description
@@ -408,6 +486,20 @@ func createImageObjectInAPI(ctx *cli.Context, vmImageDisplayName string, sourceT
 		source = ""
 	}
 
+	backend, err := resolveImageBackend(ctx)
+	if err != nil {
+		return
+	}
+
+	// The backing-image mutator reads the StorageClass from this annotation, not from
+	// spec.targetStorageClassName, and it runs before the mutator that would copy the spec over.
+	// Without it --storage-class is ignored and the create is rejected outright on any cluster
+	// whose default StorageClass is only marked with the deprecated beta annotation.
+	var imageAnnotations map[string]string
+	if sc := ctx.String("storage-class"); sc != "" {
+		imageAnnotations = map[string]string{storageClassNameAnnotation: sc}
+	}
+
 	vmImage := &v1beta1.VirtualMachineImage{
 		TypeMeta: k8smetav1.TypeMeta{
 			APIVersion: "harvesterhci.io/v1beta1",
@@ -416,8 +508,10 @@ func createImageObjectInAPI(ctx *cli.Context, vmImageDisplayName string, sourceT
 		ObjectMeta: k8smetav1.ObjectMeta{
 			GenerateName: "image-",
 			Namespace:    ctx.String("namespace"),
+			Annotations:  imageAnnotations,
 		},
 		Spec: v1beta1.VirtualMachineImageSpec{
+			Backend:                backend,
 			Description:            ctx.String("description"),
 			DisplayName:            vmImageDisplayName,
 			SourceType:             v1beta1.VirtualMachineImageSourceType(sourceType),
@@ -427,8 +521,15 @@ func createImageObjectInAPI(ctx *cli.Context, vmImageDisplayName string, sourceT
 	}
 
 	if ctx.Bool("dry-run") {
+		// generateName cannot be used with `kubectl apply`, so the dry-run manifest carries a
+		// deterministic name derived from the display name instead -- the point of --dry-run is
+		// to produce something committable.
+		dryRunImage := vmImage.DeepCopy()
+		dryRunImage.GenerateName = ""
+		dryRunImage.Name = sanitizeResourceName(vmImageDisplayName)
+
 		var out string
-		out, err = toYAML(vmImage)
+		out, err = toYAML(dryRunImage)
 		if err != nil {
 			err = fmt.Errorf("dry-run: %w", err)
 			return
@@ -451,6 +552,68 @@ func createImageObjectInAPI(ctx *cli.Context, vmImageDisplayName string, sourceT
 
 	vmImageCreateName = vmImageCreated.Name
 	return
+}
+
+// resolveImageBackend decides which storage backend the image should use. An explicit --backend
+// always wins; otherwise the StorageClass provisioner decides, since a Longhorn v1 backing image
+// cannot live on a third-party CSI StorageClass and Harvester silently rewrites the class if you try.
+func resolveImageBackend(ctx *cli.Context) (v1beta1.VMIBackend, error) {
+	switch requested := ctx.String("backend"); requested {
+	case string(v1beta1.VMIBackendBackingImage), string(v1beta1.VMIBackendCDI):
+		return v1beta1.VMIBackend(requested), nil
+	case "":
+	default:
+		return "", fmt.Errorf("invalid --backend %q, expected %q or %q", requested, v1beta1.VMIBackendBackingImage, v1beta1.VMIBackendCDI)
+	}
+
+	sc := ctx.String("storage-class")
+	if sc == "" {
+		// The cluster default StorageClass on Harvester is Longhorn v1.
+		return v1beta1.VMIBackendBackingImage, nil
+	}
+
+	kube, err := GetKubeClient(ctx)
+	if err != nil {
+		logrus.Warnf("could not build kube client (%v); assuming the %q backend", err, v1beta1.VMIBackendBackingImage)
+		return v1beta1.VMIBackendBackingImage, nil
+	}
+
+	scObject, err := kube.StorageV1().StorageClasses().Get(context.TODO(), sc, k8smetav1.GetOptions{})
+	if err != nil {
+		logrus.Warnf("could not read StorageClass %q (%v); assuming the %q backend", sc, err, v1beta1.VMIBackendBackingImage)
+		return v1beta1.VMIBackendBackingImage, nil
+	}
+
+	// Longhorn v2 volumes have no backing-image support either, so they need CDI as well.
+	if scObject.Provisioner != longhornProvisioner || scObject.Parameters["dataEngine"] == "v2" {
+		logrus.Infof("StorageClass %q is not backed by Longhorn v1, using the %q image backend", sc, v1beta1.VMIBackendCDI)
+		return v1beta1.VMIBackendCDI, nil
+	}
+
+	return v1beta1.VMIBackendBackingImage, nil
+}
+
+// sanitizeResourceName turns a display name into something usable as a Kubernetes object name.
+func sanitizeResourceName(displayName string) string {
+	name := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '.':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		default:
+			return '-'
+		}
+	}, displayName)
+
+	name = strings.Trim(name, "-.")
+	if name == "" {
+		name = "image"
+	}
+	if len(name) > 63 {
+		name = strings.Trim(name[:63], "-.")
+	}
+	return name
 }
 
 func getHarvesterAPIFromConfig(ctx *cli.Context) (serverConfig *config.ServerConfig, harvesterKubeAPIServerURL string, err error) {
@@ -564,7 +727,7 @@ func httpFetch(source string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fetching catalog metadata: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetching catalog metadata: HTTP %s", resp.Status)
 	}
@@ -624,7 +787,7 @@ func imageCatalog(ctx *cli.Context) (err error) {
 		osChoiceMap[i] = osKey
 	}
 
-	writer.Close()
+	_ = writer.Close()
 
 	fmt.Println("Insert a number to select the image OS: ")
 	reader := bufio.NewReader(os.Stdin)
@@ -653,7 +816,7 @@ func imageCatalog(ctx *cli.Context) (err error) {
 		imageChoiceMap[catalogItem.Id] = catalogItem.Url
 	}
 
-	writer.Close()
+	_ = writer.Close()
 
 	fmt.Printf("\nInsert a number to select an image to download: \n")
 	selection, err = GetSelectionFromInput(reader, len(imageChoiceMap))
@@ -763,7 +926,7 @@ func promptForNamespaceSelection(ctx *cli.Context, reader *bufio.Reader) (string
 		writer.Write(&nsRow{Id: i, Name: n.Name})
 		nsChoiceMap[i] = n.Name
 	}
-	writer.Close()
+	_ = writer.Close()
 
 	fmt.Println("\nInsert a number to select the namespace: ")
 	sel, err := GetSelectionFromInput(reader, len(nsChoiceMap))
@@ -809,14 +972,10 @@ func promptForStorageClassSelection(ctx *cli.Context, reader *bufio.Reader) (str
 	scChoiceMap[i] = ""
 	for _, sc := range scList.Items {
 		i++
-		def := ""
-		if sc.Annotations["storageclass.kubernetes.io/is-default-class"] == "true" {
-			def = "*"
-		}
-		writer.Write(&scRow{Id: i, Name: sc.Name, Default: def})
+		writer.Write(&scRow{Id: i, Name: sc.Name, Default: defaultMarker(sc.Annotations)})
 		scChoiceMap[i] = sc.Name
 	}
-	writer.Close()
+	_ = writer.Close()
 
 	fmt.Println("\nInsert a number to select the StorageClass (* = cluster default): ")
 	sel, err := GetSelectionFromInput(reader, len(scChoiceMap))
@@ -846,7 +1005,7 @@ func imageCatalogList(ctx *cli.Context) error {
 			{"SHORT NAME", "ShortName"},
 			{"URL", "Url"},
 		}, ctxv1)
-		defer writer.Close()
+		defer func() { _ = writer.Close() }()
 		for _, e := range entries {
 			entry := e
 			writer.Write(&entry)
@@ -870,7 +1029,7 @@ func imageCatalogList(ctx *cli.Context) error {
 		{"SHORT NAME", "ShortName"},
 		{"URL", "Url"},
 	}, ctxv1)
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 
 	for _, osKey := range catalogOSKeys(catalog) {
 		label := catalog.LabelFor(osKey)

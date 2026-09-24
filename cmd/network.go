@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	rcmd "github.com/rancher/cli/cmd"
 	"github.com/urfave/cli/v2"
@@ -20,6 +21,14 @@ type NetworkData struct {
 type cniConfig struct {
 	Type string `json:"type"`
 	VLAN int    `json:"vlan"`
+	// VLANTrunk carries the ranges of a trunked bridge network, where spec.config has "vlan": 0.
+	VLANTrunk []cniVLANTrunkRange `json:"vlanTrunk,omitempty"`
+}
+
+type cniVLANTrunkRange struct {
+	ID    int `json:"id,omitempty"`
+	MinID int `json:"minID,omitempty"`
+	MaxID int `json:"maxID,omitempty"`
 }
 
 // NetworkCommand defines the CLI command for listing VM networks
@@ -66,7 +75,7 @@ func networkList(ctx *cli.Context) (err error) {
 		{"VLAN ID", "VLAN"},
 	}, ctxv1)
 
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 
 	for _, nad := range nadList.Items {
 		cniType, vlanID := parseCNIConfig(nad.Spec.Config)
@@ -90,6 +99,24 @@ func parseCNIConfig(raw string) (cniType string, vlanID string) {
 	cniType = cfg.Type
 	if cfg.VLAN != 0 {
 		vlanID = fmt.Sprintf("%d", cfg.VLAN)
+		return
 	}
+
+	// A trunked network has no single VLAN ID, it carries a set of ranges instead.
+	ranges := make([]string, 0, len(cfg.VLANTrunk))
+	for _, trunk := range cfg.VLANTrunk {
+		switch {
+		case trunk.MinID != 0 && trunk.MaxID != 0 && trunk.MinID != trunk.MaxID:
+			ranges = append(ranges, fmt.Sprintf("%d-%d", trunk.MinID, trunk.MaxID))
+		case trunk.MinID != 0:
+			ranges = append(ranges, fmt.Sprintf("%d", trunk.MinID))
+		case trunk.ID != 0:
+			ranges = append(ranges, fmt.Sprintf("%d", trunk.ID))
+		}
+	}
+	if len(ranges) > 0 {
+		vlanID = "trunk " + strings.Join(ranges, ",")
+	}
+
 	return
 }

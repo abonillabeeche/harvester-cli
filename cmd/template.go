@@ -11,6 +11,7 @@ import (
 	"github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
 	harvclient "github.com/harvester/harvester/pkg/generated/clientset/versioned"
 	rcmd "github.com/rancher/cli/cmd"
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	"gopkg.in/yaml.v3"
 	v1 "k8s.io/api/core/v1"
@@ -117,7 +118,7 @@ func templateList(ctx *cli.Context) (err error) {
 	},
 		ctxv1)
 
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 
 	for _, tplItem := range tplList.Items {
 
@@ -173,10 +174,15 @@ func templateShow(ctx *cli.Context) error {
 		return fmt.Errorf("error during querying VM Template, %w", err)
 	}
 
+	// A template can legitimately have no image (ISO-booted templates), and it can reference an
+	// image that has since been deleted. Neither should stop us from showing the rest of it.
 	imageName, err := getImageName(matchingVMTemplate, c)
 
 	if err != nil {
-		return err
+		logrus.Debugf("could not resolve the image of template %s: %v", vmTemplateNameWithNS, err)
+		if imageName == "" {
+			imageName = "<none>"
+		}
 	}
 
 	var toShowTemplate TemplateData
@@ -189,14 +195,15 @@ func templateShow(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
+	// Templates that were never given an SSH key carry no sshNames annotation at all.
 	var keypairsFromTemplate []string
-	err = json.Unmarshal(([]byte)(matchingVMTemplate.Spec.VM.Spec.Template.ObjectMeta.Annotations[sshkeyAnnotation]), &keypairsFromTemplate)
+	if sshNames := matchingVMTemplate.Spec.VM.Spec.Template.ObjectMeta.Annotations[sshkeyAnnotation]; sshNames != "" {
+		if err := json.Unmarshal([]byte(sshNames), &keypairsFromTemplate); err != nil {
+			return fmt.Errorf("failed to parse the %s annotation of the template: %w", sshkeyAnnotation, err)
+		}
+	}
 
 	toShowTemplate.Keypairs = keypairsFromTemplate
-
-	if err != nil {
-		return err
-	}
 
 	toShowTemplate.Interfaces = mapInterfaceData(matchingVMTemplate)
 	toShowTemplate.Image = imageName
@@ -207,7 +214,7 @@ func templateShow(ctx *cli.Context) error {
 		return fmt.Errorf("failed during encoding an object to YAML: %w", err)
 	}
 
-	var templateYAMLstring string = string(templateYAMLbytes)
+	var templateYAMLstring = string(templateYAMLbytes)
 
 	fmt.Println(templateYAMLstring)
 
@@ -219,7 +226,7 @@ func templateShow(ctx *cli.Context) error {
 func mapVolumeData(ctx *cli.Context, matchingVMTemplate *v1beta1.VirtualMachineTemplateVersion) (volumes []Volume, err error) {
 
 	for _, origVolume := range matchingVMTemplate.Spec.VM.Spec.Template.Spec.Volumes {
-		if origVolume.VolumeSource.PersistentVolumeClaim != nil {
+		if origVolume.PersistentVolumeClaim != nil {
 
 			size, err := getPvcSizeFromMatchingAnnotation(origVolume.PersistentVolumeClaim.ClaimName, matchingVMTemplate)
 
@@ -236,7 +243,7 @@ func mapVolumeData(ctx *cli.Context, matchingVMTemplate *v1beta1.VirtualMachineT
 				},
 			})
 		}
-		if origVolume.VolumeSource.CloudInitNoCloud != nil {
+		if origVolume.CloudInitNoCloud != nil {
 
 			networkData, err := getCloudInitDataFromSecret(ctx, origVolume.CloudInitNoCloud.UserDataSecretRef.Name, matchingVMTemplate.Namespace, "networkdata")
 
@@ -320,7 +327,7 @@ func getImageName(matchingVMTemplate *v1beta1.VirtualMachineTemplateVersion, c *
 	var imageIDFull string
 	for _, claimObject := range claimObjectList {
 		if claimObject.Annotations[imageIDAnnot] != "" {
-			imageIDFull = claimObject.ObjectMeta.Annotations[imageIDAnnot]
+			imageIDFull = claimObject.Annotations[imageIDAnnot]
 		}
 	}
 	if imageIDFull == "" {
@@ -334,6 +341,9 @@ func getImageName(matchingVMTemplate *v1beta1.VirtualMachineTemplateVersion, c *
 	imageObject, err1 := c.HarvesterhciV1beta1().VirtualMachineImages(imageNS).Get(context.TODO(), imageID, k8smetav1.GetOptions{})
 
 	if err1 != nil {
+		// Fall back to the raw image ID: the display name is nicer, but a template pointing at a
+		// deleted image is still worth showing, and the ID says which one is missing.
+		image = imageIDFull
 		err = fmt.Errorf("error during getting image object, %w", err1)
 		return
 	}
@@ -364,8 +374,8 @@ func mapInterfaceData(vmTemplateVersion *v1beta1.VirtualMachineTemplateVersion) 
 		for _, origNetwork := range vmTemplateVersion.Spec.VM.Spec.Template.Spec.Networks {
 			if origNetwork.Name == origInterface.Name {
 
-				if origNetwork.NetworkSource.Multus != nil {
-					networkName = origNetwork.NetworkSource.Multus.NetworkName
+				if origNetwork.Multus != nil {
+					networkName = origNetwork.Multus.NetworkName
 					networkType = "multus"
 				} else {
 					networkType = "pod"

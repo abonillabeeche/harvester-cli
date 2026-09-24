@@ -58,13 +58,15 @@ func mainErr() error {
 			Usage: "Debug logging",
 		},
 		&cli.StringFlag{
-			Name:    "harvester-config, hconf",
+			Name:    "harvester-config",
+			Aliases: []string{"hconf"},
 			Usage:   "Path to Harvester's config file",
 			EnvVars: []string{"HARVESTER_CONFIG"},
 			Value:   path.Join(userHome, ".harvester", "config"),
 		},
 		&cli.StringFlag{
-			Name:    "config, rconf",
+			Name:    "config",
+			Aliases: []string{"rconf"},
 			Usage:   "Path to Rancher's config file",
 			EnvVars: []string{"RANCHER_CONFIG"},
 			Value:   path.Join(userHome, ".rancher"),
@@ -92,6 +94,7 @@ func mainErr() error {
 		cmd.CompleteCommand(),
 	}
 	app.EnableBashCompletion = true
+	cmd.GuardCommandUsage(app.Commands)
 
 	cmd.SetEmbeddedCatalog(embeddedCatalog)
 

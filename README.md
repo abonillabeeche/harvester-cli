@@ -5,6 +5,8 @@
 
 A fast, kubectl-style command-line tool for managing [Harvester HCI](https://harvesterhci.io) clusters — create and control VMs, images, volumes, networks, and hosts without leaving your terminal.
 
+Built and tested against **Harvester v1.9.0** (KubeVirt 1.8.x). Earlier 1.x clusters keep working, minus the two 1.9.0-only features: `image create --backend cdi` and `import --source-cluster-type ova`.
+
 ---
 
 ## Table of Contents
@@ -22,6 +24,7 @@ A fast, kubectl-style command-line tool for managing [Harvester HCI](https://har
   - [Templates](#templates)
   - [SSH Keypairs](#ssh-keypairs)
   - [Shell Access](#shell-access)
+  - [VM Import](#vm-import)
 - [Dry-run and GitOps](#dry-run-and-gitops)
 - [Tips and Gotchas](#tips-and-gotchas)
 
@@ -32,14 +35,15 @@ A fast, kubectl-style command-line tool for managing [Harvester HCI](https://har
 | Area | Capabilities |
 |---|---|
 | **Virtual Machines** | List, create, delete, start, stop, restart, live-migrate |
-| **VM Images** | List (with StorageClass), upload from URL or file |
+| **VM Images** | List (with StorageClass and backend), upload from URL or file, delete, Longhorn backing-image or CDI backend |
 | **Image Catalog** | Curated list of cloud-init-enabled Linux images (Fedora, CentOS Stream, Debian, AlmaLinux, Rocky, Ubuntu, openSUSE); interactive picker, scriptable `create`, works offline via embedded JSON + `catalog init` cache |
-| **Networks** | List NADs with VLAN info |
-| **Volumes** | List PVCs with live Longhorn usage and StorageClass; create new PVCs |
+| **Networks** | List NADs with VLAN info, including trunk ranges |
+| **Volumes** | List PVCs with live Longhorn usage and StorageClass; create and delete PVCs |
 | **Hosts** | List nodes with real-time CPU % and memory usage from the metrics API |
 | **Templates** | List and inspect VM templates |
 | **SSH Keypairs** | List registered public keys |
 | **Shell** | Direct SSH into a running VM |
+| **VM Import** | Enable the vm-import-controller and import guests from VMware, OpenStack or an OVA server |
 | **Config** | Login to Rancher and auto-download the Harvester kubeconfig |
 | **Dry-run** | Print the Kubernetes YAML for any `create` command without applying it — ideal for GitOps workflows |
 
@@ -219,20 +223,32 @@ harvester vm migrate -n default my-vm
 harvester image list [-n NAMESPACE]
 ```
 
-Lists VM images with their source type, StorageClass, and URL.
+Lists VM images with their source type, storage backend, StorageClass, and URL.
 
 ```
-NAME              ID                     SOURCE TYPE   STORAGE CLASS   URL
-ubuntu-noble      default/ubuntu-noble   download      tworeplicas     https://cloud-images.ubuntu.com/...
+NAME              ID                     SOURCE TYPE   BACKEND        STORAGE CLASS   URL
+ubuntu-noble      default/ubuntu-noble   download      backingimage   tworeplicas     https://cloud-images.ubuntu.com/...
+leap-16           default/leap-16        download      cdi            ceph-rbd        https://download.opensuse.org/...
 ```
 
 ---
 
 ```bash
-harvester image create --source URL [--storage-class CLASS] [-n NAMESPACE] IMAGE_NAME
+harvester image create --source URL [--storage-class CLASS] [--backend BACKEND] [-n NAMESPACE] IMAGE_NAME
 ```
 
 Uploads a VM image from an HTTP/HTTPS URL (or local file path). Prints the image ID on success.
+
+`--backend` picks how Harvester stores the image:
+
+| Backend | Meaning |
+|---|---|
+| `backingimage` | Longhorn v1 backing image — the Harvester default |
+| `cdi` | Imported through CDI, the only backend that can place an image on a third-party CSI StorageClass (Ceph RBD, LINSTOR, Longhorn v2, …) |
+
+Leave it out and the CLI infers it from `--storage-class`: anything that is not Longhorn v1 gets `cdi`, because a backing image cannot live on a third-party StorageClass and Harvester would silently move the image back to a Longhorn class.
+
+> **CDI caveat:** the CDI importer needs the source server to return a `Content-Length` header. Some mirrors (notably `cloud-images.ubuntu.com` with chunked transfer encoding) do not, and the import fails with `failed to fetch image size`. Use a mirror that sends the header, or the `backingimage` backend.
 
 ```bash
 # Upload Ubuntu Noble using the tworeplicas storage class
@@ -242,11 +258,50 @@ harvester image create \
   ubuntu-noble
 # Image created: default/ubuntu-noble
 
+# Put an image on Ceph RBD -- the cdi backend is inferred from the StorageClass
+harvester image create \
+  --source https://download.opensuse.org/distribution/leap/16.0/appliances/Leap-16.0-Minimal-VM.x86_64-Cloud.qcow2 \
+  --storage-class ceph-rbd \
+  leap-16
+
+# ...or ask for it explicitly
+harvester image create --backend cdi \
+  --source https://download.opensuse.org/distribution/leap/16.0/appliances/Leap-16.0-Minimal-VM.x86_64-Cloud.qcow2 \
+  --storage-class ceph-rbd \
+  leap-16
+
 # Preview the manifest without applying it
 harvester image create --dry-run \
   --source https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img \
   ubuntu-noble
 ```
+
+> `--storage-class` is also written to the `harvesterhci.io/storageClassName` annotation, which is
+> where Harvester's backing-image mutator actually reads it from. Without the annotation the flag is
+> ignored on the `backingimage` path, and on a cluster whose default StorageClass is marked only
+> with the deprecated `storageclass.beta.kubernetes.io/is-default-class` annotation the create is
+> rejected outright with `no default storageClass found for backingImage`.
+
+---
+
+```bash
+harvester image delete [-n NAMESPACE] IMAGE_NAME [IMAGE_NAME...]
+```
+
+Deletes one or more images. An image can be named either by the display name `image list` shows or
+by its resource name (the part after the `/` in the ID column). Unlike `vm create --vm-image-id`,
+the lookup never leaves the namespace — a delete should not reach across the cluster for something
+that merely looks close enough.
+
+```bash
+harvester image delete ubuntu-noble
+# VM image ubuntu-noble (default/image-zzkzm) deleted successfully
+
+harvester image delete -n staging leap-16 image-ccxcx
+```
+
+Harvester refuses the delete while a VM or volume still depends on the image, and the webhook's
+error is passed through unchanged.
 
 ---
 
@@ -416,12 +471,15 @@ FATA unknown OS "nonexistent". Available: almalinux, centos-stream, debian, fedo
 harvester network list [-n NAMESPACE]
 ```
 
-Lists NetworkAttachmentDefinitions with their CNI type and VLAN ID.
+Lists NetworkAttachmentDefinitions with their CNI type and VLAN ID. A trunk network carries a set of
+ranges rather than a single ID, and is shown as `trunk <ranges>`.
 
 ```
-NAME    NAMESPACE   TYPE     VLAN ID
-vlan1   default     bridge   1
-vlan10  default     bridge   10
+NAME         NAMESPACE   TYPE       VLAN ID
+vlan1        default     bridge     1
+vlan10       default     bridge     10
+multi-vlan   default     bridge     trunk 1000-1010,2001
+public-nat   default     kube-ovn
 ```
 
 ---
@@ -463,15 +521,43 @@ harvester volume create --sc tworeplicas --size 20Gi my-data-vol
 ---
 
 ```bash
+harvester volume delete [-n NAMESPACE] [--force] VOLUME_NAME [VOLUME_NAME...]
+```
+
+Deletes PersistentVolumeClaims. A volume that a VM still lists as a disk is refused by name, because
+deleting it would leave the PVC in `Terminating` until the VM itself is gone — which looks like a
+hang. Pass `--force` to skip the check.
+
+```bash
+harvester volume delete my-data-vol
+# Volume deleted: default/my-data-vol
+
+harvester volume delete my-vm-disk
+# FATA volume default/my-vm-disk is still used by VM my-vm, delete the VM first or pass --force
+```
+
+---
+
+```bash
 harvester volume list-storageclass
 ```
 
-Lists all StorageClasses in the cluster — equivalent to `kubectl get sc`.
+Lists all StorageClasses in the cluster — equivalent to `kubectl get sc`, plus a `DEFAULT` column.
 
 ```
-NAME                  PROVISIONER             RECLAIM POLICY   BINDING MODE    ALLOW EXPANSION
-harvester-longhorn    driver.longhorn.io      Delete           Immediate       true
-tworeplicas           driver.longhorn.io      Delete           Immediate       true
+NAME                  DEFAULT   PROVISIONER             RECLAIM POLICY   BINDING MODE    ALLOW EXPANSION
+harvester-longhorn    *         driver.longhorn.io      Delete           Immediate       true
+tworeplicas                     driver.longhorn.io      Delete           Immediate       true
+```
+
+Harvester honours only `storageclass.kubernetes.io/is-default-class`. A class marked default with
+nothing but the deprecated `storageclass.beta.kubernetes.io/is-default-class` looks default to
+`kubectl` while Harvester acts as if the cluster has none — which shows up much later as
+`no default storageClass found for backingImage`. That case is named rather than left blank:
+
+```
+NAME                  DEFAULT                             PROVISIONER          RECLAIM POLICY   BINDING MODE   ALLOW EXPANSION
+harvester-longhorn    (beta only, Harvester ignores it)   driver.longhorn.io   Delete           Immediate      true
 ```
 
 ---
@@ -538,6 +624,115 @@ Opens an interactive SSH session directly into a running VM. Requires `ssh` to b
 ```bash
 harvester shell --ssh-user ubuntu --ssh-key ~/.ssh/mykey my-vm
 ```
+
+---
+
+### VM Import
+
+Drives Harvester's `vm-import-controller` addon, which migrates guests from another platform into
+Harvester. Three source types are supported: `vmware`, `openstack`, and — new in Harvester v1.9.0 —
+`ova`, which pulls OVA files straight off an HTTP server.
+
+```bash
+harvester import enable
+```
+
+Enables the `vm-import-controller` addon. Safe to re-run; it is a no-op when already enabled.
+
+Until it is enabled the migration CRDs do not exist, and every other `import` subcommand fails with
+a 404 from the API server. The CLI adds the missing half of that message:
+
+```
+FATA failed to list VM imports: the server could not find the requested resource
+     (get virtualmachineimports.migration.harvesterhci.io). The vm-import-controller addon looks
+     disabled, run 'harvester import enable' first
+```
+
+---
+
+```bash
+harvester import source-add \
+  --source-cluster-type TYPE \
+  --source-cluster-namespace NAMESPACE \
+  --endpoint ENDPOINT \
+  [--credentials-secret NS/SECRET] \
+  [--dc DATACENTER] [--region REGION] [--http-timeout SECONDS] \
+  SOURCE_NAME
+```
+
+Registers a source to import from. Which flags apply depends on the type:
+
+| Type | `--endpoint` | `--dc` | `--region` | `--credentials-secret` | `--http-timeout` |
+|---|---|---|---|---|---|
+| `vmware` | vCenter URL | required | — | required | — |
+| `openstack` | Keystone URL | — | required | required | — |
+| `ova` | URL the OVA files are served from | — | — | optional | optional, defaults to 600 |
+
+For `ova`, the referenced secret may hold `username`, `password` and `ca.crt` keys; omit it entirely
+for an unauthenticated server.
+
+```bash
+# VMware vCenter
+harvester import source-add \
+  --source-cluster-type vmware \
+  --source-cluster-namespace harvester-system \
+  --endpoint https://vcenter.example.com/sdk \
+  --dc DC1 \
+  --credentials-secret harvester-system/vcenter-creds \
+  my-vcenter
+
+# OVA files on a plain HTTP server, 2-minute download timeout
+harvester import source-add \
+  --source-cluster-type ova \
+  --source-cluster-namespace harvester-system \
+  --endpoint http://images.example.com/ovas/ \
+  --http-timeout 120 \
+  my-ovas
+```
+
+---
+
+```bash
+harvester import create \
+  --vm-name GUEST \
+  --source-cluster SOURCE_NAME \
+  --source-cluster-type TYPE \
+  --source-cluster-namespace NAMESPACE \
+  [--network-mapping SRC:DST ...] \
+  VM_IMPORT_NAME
+```
+
+Starts an import. `--network-mapping` (alias `--net-map`) may be repeated to map each source network
+onto a Harvester network; for `ova`, `--vm-name` is the OVA file name relative to `--endpoint`.
+
+```bash
+harvester import create \
+  --vm-name my-guest.ova \
+  --source-cluster my-ovas \
+  --source-cluster-type ova \
+  --source-cluster-namespace harvester-system \
+  --net-map "VM Network:default/vlan1" \
+  import-my-guest
+```
+
+---
+
+```bash
+harvester import list [-n NAMESPACE]
+harvester import delete [-n NAMESPACE] VM_IMPORT_NAME
+harvester import source-delete [-n NAMESPACE] [--type TYPE] SOURCE_NAME
+```
+
+An import lives in the same namespace as its source, which is not necessarily `harvester-system`, so
+`import list` covers every namespace unless `-n` narrows it.
+
+```
+NAME             NAMESPACE          VM NAME        STATUS    SOURCE_CLUSTER   CLUSTER_TYPE
+import-my-guest  harvester-system   my-guest.ova   Running   my-ovas          OvaSource
+```
+
+`--source-cluster-namespace` and `-n`/`--namespace` are accepted interchangeably across every
+`import` subcommand.
 
 ---
 
@@ -680,16 +875,44 @@ git add manifests/ && git commit -m "add prod db-server" && git push
 
 ## Tips and Gotchas
 
-### Flag ordering with `vm create`
+### Flag ordering
 
-Due to how Go's flag parser works with positional arguments, **all flags must appear before the VM name**:
+Due to how Go's flag parser works with positional arguments, **all flags must appear before the
+positional argument**, on every command:
 
 ```bash
 # Correct
 harvester vm create --cpus 2 --memory 4Gi my-vm
 
-# Wrong — flags after the name are silently ignored
+# Rejected
 harvester vm create my-vm --cpus 2 --memory 4Gi
+# FATA flag "--cpus" was given after a positional argument and would be ignored,
+#      put every flag before the argument
+```
+
+The CLI refuses to run rather than dropping the flags, which used to mean a stray
+`harvester vm create my-vm --dry-run` really created the VM.
+
+### Misspelled subcommands
+
+Every top-level command lists when it is called with no subcommand, and urfave/cli falls through to
+that action when the subcommand does not exist — so `harvester image delet foo` used to print the
+image list and exit 0. It now names the mistake:
+
+```bash
+harvester image delet my-image
+# FATA unknown subcommand "delet" for "image", expected one of: list, create, delete, catalog, help
+```
+
+### Sizes need a unit
+
+`--memory 4` is 4 *bytes*, not 4 GiB, and Harvester rejects it much later with a confusing
+`guest memory is under the minimum requirement (10 Mi)`. `--memory` and `--disk-size` are now checked
+before anything is sent:
+
+```bash
+harvester vm create -m 4 my-vm
+# FATA invalid --memory "4", a bare number is read as bytes -- use a unit, such as 4Gi
 ```
 
 ### Cross-namespace references

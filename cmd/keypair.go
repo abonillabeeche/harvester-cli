@@ -61,7 +61,7 @@ func keypairList(ctx *cli.Context) (err error) {
 	},
 		ctxv1)
 
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 
 	for _, keyItem := range keyList.Items {
 
