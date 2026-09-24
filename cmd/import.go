@@ -33,6 +33,16 @@ var sourceClusterTypes = map[string]struct {
 
 const sourceClusterTypeUsage = "Type of the source cluster to import the VM from, this can take values of 'vmware', 'openstack' or 'ova'"
 
+// hintImportAddon explains the bare 404 that every import command gets when the migration CRDs are
+// not installed. The API server only says it cannot find the resource, which reads like a broken
+// cluster rather than an addon that was never turned on.
+func hintImportAddon(err error) error {
+	if err != nil && strings.Contains(err.Error(), "could not find the requested resource") {
+		return fmt.Errorf("%w. The vm-import-controller addon looks disabled, run 'harvester import enable' first", err)
+	}
+	return err
+}
+
 // resolveSourceClusterType looks up the API resource and kind for a --source-cluster-type value.
 func resolveSourceClusterType(sourceType string) (resource string, kind string, err error) {
 	entry, found := sourceClusterTypes[sourceType]
@@ -273,7 +283,7 @@ func listVMImports(ctx *cli.Context) error {
 	vmImportResultRaw, err := request.DoRaw(context.Background())
 
 	if err != nil {
-		return fmt.Errorf("failed to list VM imports: %v", err)
+		return hintImportAddon(fmt.Errorf("failed to list VM imports: %v", err))
 	}
 
 	var vmImportList VMImportV1.VirtualMachineImportList
@@ -435,7 +445,7 @@ func configureVMImport(ctx *cli.Context) error {
 
 	_, err = c.HarvesterhciV1beta1().RESTClient().Post().Resource(resourceType + ".migration").Namespace(ctx.String("source-cluster-namespace")).Body(createVMSourceBody).DoRaw(context.Background())
 	if err != nil {
-		return fmt.Errorf("failed to create %s for VM import: %v", resourceType, err)
+		return hintImportAddon(fmt.Errorf("failed to create %s for VM import: %v", resourceType, err))
 	}
 	logrus.Infof("VM import source created successfully (%s)", ctx.Args().First())
 
@@ -461,7 +471,7 @@ func deleteVMImportSource(ctx *cli.Context) error {
 
 	err = c.HarvesterhciV1beta1().RESTClient().Delete().Resource(resourceType + ".migration").Namespace(ctx.String("namespace")).Name(ctx.Args().First()).Do(context.Background()).Error()
 	if err != nil {
-		return fmt.Errorf("failed to delete %s for VM import: %v", resourceType, err)
+		return hintImportAddon(fmt.Errorf("failed to delete %s for VM import: %v", resourceType, err))
 	}
 	logrus.Infof("VM import source deleted successfully (%s)", ctx.Args().First())
 
@@ -527,7 +537,7 @@ func createVMImport(ctx *cli.Context) error {
 
 	_, err = c.HarvesterhciV1beta1().RESTClient().Post().Resource("virtualmachineimports.migration").Namespace(ctx.String("source-cluster-namespace")).Body(createVMImportBody).DoRaw(context.Background())
 	if err != nil {
-		return fmt.Errorf("failed to create vm import: %v", err)
+		return hintImportAddon(fmt.Errorf("failed to create vm import: %v", err))
 	}
 
 	logrus.Infof("VM import created successfully (%s)", ctx.Args().First())
@@ -550,7 +560,7 @@ func deleteVMImport(ctx *cli.Context) error {
 
 	err = c.HarvesterhciV1beta1().RESTClient().Delete().Resource("virtualmachineimports.migration").Namespace(ctx.String("namespace")).Name(ctx.Args().First()).Do(context.Background()).Error()
 	if err != nil {
-		return fmt.Errorf("failed to delete vm import: %v", err)
+		return hintImportAddon(fmt.Errorf("failed to delete vm import: %v", err))
 	}
 
 	logrus.Infof("VM import deleted successfully (%s)", ctx.Args().First())

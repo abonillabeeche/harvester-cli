@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"flag"
 	"strings"
 	"testing"
@@ -105,6 +106,57 @@ func TestGuardCommandUsageChainsExistingBefore(t *testing.T) {
 	}
 	if existingRan {
 		t.Error("the original Before must not run once the guard has failed")
+	}
+}
+
+func TestDefaultMarker(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		want        string
+	}{
+		{name: "not default", annotations: nil, want: ""},
+		{name: "modern annotation", annotations: map[string]string{defaultStorageClassAnnotation: "true"}, want: "*"},
+		{
+			name:        "modern wins over beta",
+			annotations: map[string]string{defaultStorageClassAnnotation: "true", betaDefaultStorageClassAnnotation: "false"},
+			want:        "*",
+		},
+		{
+			// The retail-store cluster looks exactly like this, and Harvester behaves as if it had
+			// no default StorageClass at all.
+			name:        "beta only is called out",
+			annotations: map[string]string{defaultStorageClassAnnotation: "false", betaDefaultStorageClassAnnotation: "true"},
+			want:        "(beta only, Harvester ignores it)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := defaultMarker(tt.annotations); got != tt.want {
+				t.Errorf("defaultMarker(%v) = %q, want %q", tt.annotations, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHintImportAddon(t *testing.T) {
+	if err := hintImportAddon(nil); err != nil {
+		t.Errorf("a nil error must stay nil, got %v", err)
+	}
+
+	other := errors.New("connection refused")
+	if got := hintImportAddon(other); got != other {
+		t.Errorf("an unrelated error must be passed through unchanged, got %v", got)
+	}
+
+	missing := errors.New("the server could not find the requested resource (get virtualmachineimports.migration.harvesterhci.io)")
+	got := hintImportAddon(missing)
+	if !strings.Contains(got.Error(), "harvester import enable") {
+		t.Errorf("a missing CRD should point at the addon, got %v", got)
+	}
+	if !errors.Is(got, missing) {
+		t.Error("the original error should stay wrapped")
 	}
 }
 

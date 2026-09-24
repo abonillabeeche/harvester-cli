@@ -22,10 +22,30 @@ type VolumeData struct {
 
 type StorageClassData struct {
 	Name              string
+	Default           string
 	Provisioner       string
 	ReclaimPolicy     string
 	VolumeBindingMode string
 	AllowExpansion    string
+}
+
+const (
+	defaultStorageClassAnnotation     = "storageclass.kubernetes.io/is-default-class"
+	betaDefaultStorageClassAnnotation = "storageclass.beta.kubernetes.io/is-default-class"
+)
+
+// defaultMarker says whether a StorageClass is the cluster default. Harvester only honours the
+// modern annotation, so a class carrying nothing but the deprecated beta one is called out: it looks
+// default to kubectl, but Harvester behaves as if the cluster has no default at all and rejects
+// backing-image creates with "no default storageClass found for backingImage".
+func defaultMarker(annotations map[string]string) string {
+	if annotations[defaultStorageClassAnnotation] == "true" {
+		return "*"
+	}
+	if annotations[betaDefaultStorageClassAnnotation] == "true" {
+		return "(beta only, Harvester ignores it)"
+	}
+	return ""
 }
 
 func VolumeCommand() *cli.Command {
@@ -304,6 +324,7 @@ func volumeListStorageClass(ctx *cli.Context) error {
 
 	writer := rcmd.NewTableWriter([][]string{
 		{"NAME", "Name"},
+		{"DEFAULT", "Default"},
 		{"PROVISIONER", "Provisioner"},
 		{"RECLAIM POLICY", "ReclaimPolicy"},
 		{"BINDING MODE", "VolumeBindingMode"},
@@ -326,6 +347,7 @@ func volumeListStorageClass(ctx *cli.Context) error {
 		}
 		writer.Write(&StorageClassData{
 			Name:              sc.Name,
+			Default:           defaultMarker(sc.Annotations),
 			Provisioner:       sc.Provisioner,
 			ReclaimPolicy:     rp,
 			VolumeBindingMode: bm,

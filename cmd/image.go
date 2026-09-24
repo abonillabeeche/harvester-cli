@@ -972,11 +972,7 @@ func promptForStorageClassSelection(ctx *cli.Context, reader *bufio.Reader) (str
 	scChoiceMap[i] = ""
 	for _, sc := range scList.Items {
 		i++
-		def := ""
-		if sc.Annotations["storageclass.kubernetes.io/is-default-class"] == "true" {
-			def = "*"
-		}
-		writer.Write(&scRow{Id: i, Name: sc.Name, Default: def})
+		writer.Write(&scRow{Id: i, Name: sc.Name, Default: defaultMarker(sc.Annotations)})
 		scChoiceMap[i] = sc.Name
 	}
 	_ = writer.Close()

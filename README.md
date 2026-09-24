@@ -542,12 +542,22 @@ harvester volume delete my-vm-disk
 harvester volume list-storageclass
 ```
 
-Lists all StorageClasses in the cluster — equivalent to `kubectl get sc`.
+Lists all StorageClasses in the cluster — equivalent to `kubectl get sc`, plus a `DEFAULT` column.
 
 ```
-NAME                  PROVISIONER             RECLAIM POLICY   BINDING MODE    ALLOW EXPANSION
-harvester-longhorn    driver.longhorn.io      Delete           Immediate       true
-tworeplicas           driver.longhorn.io      Delete           Immediate       true
+NAME                  DEFAULT   PROVISIONER             RECLAIM POLICY   BINDING MODE    ALLOW EXPANSION
+harvester-longhorn    *         driver.longhorn.io      Delete           Immediate       true
+tworeplicas                     driver.longhorn.io      Delete           Immediate       true
+```
+
+Harvester honours only `storageclass.kubernetes.io/is-default-class`. A class marked default with
+nothing but the deprecated `storageclass.beta.kubernetes.io/is-default-class` looks default to
+`kubectl` while Harvester acts as if the cluster has none — which shows up much later as
+`no default storageClass found for backingImage`. That case is named rather than left blank:
+
+```
+NAME                  DEFAULT                             PROVISIONER          RECLAIM POLICY   BINDING MODE   ALLOW EXPANSION
+harvester-longhorn    (beta only, Harvester ignores it)   driver.longhorn.io   Delete           Immediate      true
 ```
 
 ---
@@ -628,6 +638,15 @@ harvester import enable
 ```
 
 Enables the `vm-import-controller` addon. Safe to re-run; it is a no-op when already enabled.
+
+Until it is enabled the migration CRDs do not exist, and every other `import` subcommand fails with
+a 404 from the API server. The CLI adds the missing half of that message:
+
+```
+FATA failed to list VM imports: the server could not find the requested resource
+     (get virtualmachineimports.migration.harvesterhci.io). The vm-import-controller addon looks
+     disabled, run 'harvester import enable' first
+```
 
 ---
 
